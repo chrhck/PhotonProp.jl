@@ -1,11 +1,12 @@
-using Revise
 include("src/photon_prob_cuda.jl")
+include("src/lightyield.jl")
 
 using CUDA
 using Unitful
 using StaticArrays
 using Plots
 using StatsPlots
+using StatsBase
 using Statistics
 using PhysicalConstants.CODATA2018
 using Distributions
@@ -13,18 +14,21 @@ using Sobol
 using DataFrames
 using Parquet
 using Random
-using ScikitLearn
-using ScikitLearn.GridSearch: RandomizedSearchCV
-using PyCall: @pyimport
-
+using Flux
+using Base.Iterators: partition
+using QuadGK
+using Flux:params as fparams
+using Flux.Data: DataLoader
+using Flux.Losses: mse
+using Flux:@epochs
+using Printf
+using Parameters: @with_kw
 using .PhotonPropagation
 using .Spectral
 using .Medium
-
+using .LightYield
 
 using Printf
-
-@pyimport scipy.stats as stats
 
 function get_dir_reweight(thetas, obs_angle, ref_ix)    
     norm = cherenkov_ang_dist_int.(ref_ix, Ref(-1.), Ref(1.)) .* 2
@@ -118,105 +122,153 @@ end
 results_df = make_photon_fits(Int64(1E7), 100, 100)
 write_parquet("photon_fits.parquet", results_df)
 
-results_df = DataFrame(read_parquet("photon_fits.parquet"))
-results_df[!, :log_det_fraction] = log10.(results_df[:, :det_fraction])
 
-@df results_df marginalhist(:obs_angle, :log_det_fraction)
-
-df_train, df_test = splitdf(results_df, 0.8)
-
-feature_names = [:distance, :obs_angle]
-target_names = [:fit_alpha, :fit_theta, :det_fraction]
-
-
-features_train = df_train[:,feature_names]
-targets_train = df_train[:, target_names]
-features_test = df_test[:,feature_names]
-targets_test = df_test[:, target_names]
-
-mapper_features =  DataFrameMapper([(feature_names, nothing)])
-mapper_targets = DataFrameMapper([(target_names, nothing)])
-
-X = fit_transform!(mapper_features, copy(features_train))
-Y = fit_transform!(mapper_targets, copy(targets_train))
-
-X_test = fit_transform!(mapper_features, copy(features_test))
-Y_test = fit_transform!(mapper_targets, copy(targets_test))
-
-@sk_import ensemble: RandomForestRegressor
-
-sampler(a, b) = stats.randint(a, b)
-#sampler(a, b) = DiscreteUniform(a, b-1)  TODO
-
-# specify parameters and distributions to sample from
-param_dist = Dict("max_depth"=> [2, 3, 4, nothing],
-                  "min_samples_split"=> sampler(2, 20),
-                  "min_samples_leaf"=> sampler(1, 20),
-                  "bootstrap"=> [true, false],
-                  "criterion"=>["squared_error", "absolute_error"],
-                  "n_estimators"=> sampler(100, 250))
-
-clf = RandomForestRegressor(random_state=2, max_features=1)
-
-n_iter_search = 50
-random_search = RandomizedSearchCV(
-    clf, param_dist, n_iter=n_iter_search, random_state=MersenneTwister(42),
-  
-    )
-fit!(random_search, X, Y)
-
-
-random_search_dist = RandomizedSearchCV(
-    clf, param_dist, n_iter=n_iter_search, random_state=MersenneTwister(42),
-  
-    )
-fit!(random_search_dist, X, Y[:, 1:2])
-
-
-function report(grid_scores, n_top=5)
-    top_scores = sort(grid_scores, by=x->x.mean_validation_score, rev=true)[1:n_top]
-    for (i, score) in enumerate(top_scores)
-        println("Model with rank:$i")
-        @printf("Mean validation score: %.3f (std: %.3f)\n",
-                score.mean_validation_score,
-                std(score.cv_validation_scores))
-        println("Parameters: $(score.parameters)")
-        println("")
-    end
+@with_kw mutable struct Hyperparams
+    batch_size::Int64
+    learning_rate::Float64
+    epochs::Int64
+    width::Int64
 end
 
-report(random_search.grid_scores_)
 
-best_params = random_search.best_params_
+function read_from_parquet(filename)
+    results_df = DataFrame(read_parquet(filename))
 
-#clf = RandomForestRegressor(random_state=2, max_features=1)
+    results_df[!,:] = convert.(Float32,results_df[!,:])
+    results_df[!, :log_det_fraction] = -log10.(results_df[!, :det_fraction])
+    results_df[!, :log_distance] = log10.(results_df[!, :distance])
+    results_df[!, :cos_obs_angle] = cos.(results_df[!, :obs_angle])
+
+    feature_names = [:log_distance, :cos_obs_angle]
+    target_names = [:fit_alpha, :fit_theta, :log_det_fraction]
+
+    df_train, df_test = splitdf(results_df, 0.8)
 
 
-Y_pred = predict(random_search, X_test)
+    features_train = Matrix{Float32}(df_train[:,feature_names])'
+    targets_train = Matrix{Float32}(df_train[:, target_names])'
+    features_test = Matrix{Float32}(df_test[:,feature_names])'
+    targets_test = Matrix{Float32}(df_test[:, target_names])'
 
-score(random_search, X_test, Y_test)
+    return (features_train, targets_train, features_test, targets_test)
+
+
+end
+
+function get_data(args::Hyperparams)
+    
+    features_train, targets_train, features_test, targets_test = read_from_parquet("photon_fits.parquet")
+
+    loader_train = DataLoader((features_train, targets_train), batchsize=args.batch_size, shuffle=true)
+    loader_test = DataLoader((features_test, targets_test), batchsize=args.batch_size)
+
+    loader_train, loader_test
+end
+
+
+function loss_all(dataloader, model)
+    l = 0f0
+    for (x,y) in dataloader
+        l += mse(model(x), y)
+    end
+    l/length(dataloader)
+end
+
+
+function train(; kws...)
+    ## Initialize hyperparameter arguments
+    args = Hyperparams(; kws...)
+
+    ## Load processed data
+    train_data, test_data = get_data(args)
+    train_data = gpu.(train_data)
+    test_data = gpu.(test_data)
+
+    model = Chain(
+        Dense(2, args.width, relu),
+        Dense(args.width, args.width, relu),
+        Dense(args.width, 3))
+	
+
+    model = gpu(model)
+    loss(x, y) = mse(model(x), y)
+	
+    optimiser = ADAM(args.learning_rate)
+    evalcb = () -> @show(loss_all(train_data, model))
+
+    println("Starting training.")
+    @epochs args.epochs Flux.train!(loss, fparams(model), train_data, optimiser, cb = evalcb)
+	
+    return model, test_data
+end
+
+model, test_data = train(epochs=20, width=300, learning_rate=0.005, batch_size=200)
+
+@show loss_all(test_data, model)
+
+data = read_from_parquet("photon_fits.parquet")
+target_pred = cpu(model)(data[3])
+
+feat_test = data[3]
+targ_test = data[4]
 
 l = @layout [a b c ; d e f]
 plots = []
+feature_names = [:log_distance, :cos_obs_angle]
+target_names = [:fit_alpha, :fit_theta, :log_det_fraction]
 for (i, j) in Base.product(1:3, 1:2)
-    p = scatter(X_test[:, j], Y_test[:, i], alpha=0.7, label="Truth",
+    p = scatter(feat_test[j, :], targ_test[i, :], alpha=0.7, label="Truth",
         xlabel=feature_names[j], ylabel=target_names[i])
-    scatter!(p, X_test[:, j], Y_pred[:, i], alpha=0.7, label="Prediction")
+    scatter!(p, feat_test[j, :], target_pred[i, :], alpha=0.7, label="Prediction")
     push!(plots, p)
 end
 plot(plots..., layout=l)
 
 
-#@show score(random_search, X, Y)
 
 
-names(results_df)
 
-#histogram(tres, bins=0.:1:20.)
-#histogram(tres[1], bins=0.:0.1:10, yscale=:log10)
-#plot(distances, size.(tres, Ref(1)))
 
-rand(1:2, 10)
+log_energies = 2:0.1:8
+
+zs = 0:1:10000.
+
+plot(zs, longitudinal_profile.(Ref(1E3), zs, Ref(MediumPropertiesWater), Ref(LongitudinalParametersEMinus)))
+plot!(zs, longitudinal_profile.(Ref(1E5), zs, Ref(MediumPropertiesWater), Ref(LongitudinalParametersEMinus)))
+
+
+s = SobolSeq([0.], [3000.])
+int_grid = sort!(vec(reduce(hcat, next!(s) for i in 1:2000)))
+
+int_grid
+
+norm = quadgk(z-> longitudinal_profile(1E3, z, MediumPropertiesWater, LongitudinalParametersEMinus), 0., 3000.)[1]
+
+part_contribs = Vector{Float64}(undef, size(int_grid, 1))
+part_contribs[1] = 0
+@inbounds for i in 1:size(int_grid, 1)-1
+    lower = int_grid[i]
+    upper = int_grid[i+1]
+
+    part_contribs[i+1] = 1/norm * quadgk(z-> longitudinal_profile(1E3, z, MediumPropertiesWater, LongitudinalParametersEMinus), lower, upper)[1]
+end
+
+
+plot(int_grid, part_contribs, linetype=:steppost)
+
+
+sum(part_contribs) 
+
+tlens = cherenkov_track_length.(10 .^log_energies, Ref(CherenkovTrackLengthParametersEMinus))
+
+total_lys = map(tlen -> quadgk(wl -> cherenkov_counts(wl, tlen, MediumPropertiesWater), 200., 800.)[1], tlens)
+
+plot(log_energies, total_lys, yscale=:log10)
+
+
+
+plot(wls, cherenkov_counts.(wls, Ref(tlen[1]), Ref(MediumPropertiesWater)))
+
 
 ix = 1
 

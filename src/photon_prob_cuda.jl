@@ -8,14 +8,16 @@ using SpecialFunctions
 
 include("medium.jl")
 include("spectrum.jl")
+include("photon_source.jl")
 
 export cuda_propagate_photons!, initialize_photon_arrays, process_output
 export cherenkov_ang_dist, cherenkov_ang_dist_int
-export Isotropic, PhotonTarget, PhotonSource
-export Medium, Spectral
+export PhotonTarget
+export Medium, Spectral, PhotonSource
 
 using .Medium
 using .Spectral
+using .PhotonSource
 
 struct CherenkovAngDistParameters{T <: Real}
     a::T
@@ -134,17 +136,6 @@ struct PhotonTarget{T<:Real}
     radius::T
 end
 
-
-abstract type EmissionProfile end
-struct Isotropic{T} <: EmissionProfile end
-
-struct PhotonSource{T,U<:Spectrum,V<:EmissionProfile}
-    position::SVector{3,T}
-    time::T
-    photons::Int64
-    spectrum::U
-    emission_profile::V
-end
 
 
 
