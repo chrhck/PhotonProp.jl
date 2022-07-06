@@ -1,12 +1,13 @@
 include("src/photon_prob_cuda.jl")
-include("src/lightyield.jl")
 
 using CUDA
 using Unitful
+using UnitfulRecipes
 using StaticArrays
 using Plots
 using StatsPlots
 using StatsBase
+using QuadGK
 using Statistics
 using PhysicalConstants.CODATA2018
 using Distributions
@@ -16,7 +17,7 @@ using Parquet
 using Random
 using Flux
 using Base.Iterators: partition
-using QuadGK
+
 using Flux:params as fparams
 using Flux.Data: DataLoader
 using Flux.Losses: mse
@@ -29,6 +30,35 @@ using .Medium
 using .LightYield
 
 using Printf
+
+
+
+log_energies = 2:0.1:8
+zs = (0:100:3000.)u"cm"
+medium = make_cascadia_medium_properties(Float64)
+
+plot(zs, longitudinal_profile.(Ref(1E3u"GeV"), zs, Ref(medium), Ref(LongitudinalParametersEMinus)))
+plot!(zs, longitudinal_profile.(Ref(1E5u"GeV"), zs, Ref(medium), Ref(LongitudinalParametersEMinus)))
+
+frac_contrib = fractional_contrib_long(1E5u"GeV", zs, MediumPropertiesWater, LongitudinalParametersEMinus)
+
+plot(zs, frac_contrib, linetype=:steppost)
+sum(frac_contrib) 
+
+tlens = cherenkov_track_length.((10 .^log_energies)u"GeV", Ref(CherenkovTrackLengthParametersEMinus))
+
+plot(log_energies, tlens, yscale=:log10)
+
+
+total_lys = frank_tamm_norm((200u"nm", 800u"nm"), wl -> MediumPropertiesWater.ref_ix) * tlens
+
+plot(log_energies, ustrip(total_lys), yscale=:log10)
+
+
+
+plot(wls, cherenkov_counts.(wls, Ref(tlen[1]), Ref(MediumPropertiesWater)))
+
+
 
 function get_dir_reweight(thetas, obs_angle, ref_ix)    
     norm = cherenkov_ang_dist_int.(ref_ix, Ref(-1.), Ref(1.)) .* 2
@@ -228,46 +258,6 @@ plot(plots..., layout=l)
 
 
 
-
-log_energies = 2:0.1:8
-
-zs = 0:1:10000.
-
-plot(zs, longitudinal_profile.(Ref(1E3), zs, Ref(MediumPropertiesWater), Ref(LongitudinalParametersEMinus)))
-plot!(zs, longitudinal_profile.(Ref(1E5), zs, Ref(MediumPropertiesWater), Ref(LongitudinalParametersEMinus)))
-
-
-s = SobolSeq([0.], [3000.])
-int_grid = sort!(vec(reduce(hcat, next!(s) for i in 1:2000)))
-
-int_grid
-
-norm = quadgk(z-> longitudinal_profile(1E3, z, MediumPropertiesWater, LongitudinalParametersEMinus), 0., 3000.)[1]
-
-part_contribs = Vector{Float64}(undef, size(int_grid, 1))
-part_contribs[1] = 0
-@inbounds for i in 1:size(int_grid, 1)-1
-    lower = int_grid[i]
-    upper = int_grid[i+1]
-
-    part_contribs[i+1] = 1/norm * quadgk(z-> longitudinal_profile(1E3, z, MediumPropertiesWater, LongitudinalParametersEMinus), lower, upper)[1]
-end
-
-
-plot(int_grid, part_contribs, linetype=:steppost)
-
-
-sum(part_contribs) 
-
-tlens = cherenkov_track_length.(10 .^log_energies, Ref(CherenkovTrackLengthParametersEMinus))
-
-total_lys = map(tlen -> quadgk(wl -> cherenkov_counts(wl, tlen, MediumPropertiesWater), 200., 800.)[1], tlens)
-
-plot(log_energies, total_lys, yscale=:log10)
-
-
-
-plot(wls, cherenkov_counts.(wls, Ref(tlen[1]), Ref(MediumPropertiesWater)))
 
 
 ix = 1

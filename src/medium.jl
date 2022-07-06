@@ -1,45 +1,48 @@
 module Medium
 using Unitful
-
+using Parameters: @with_kw
 export make_cascadia_medium_properties
-export salinity, pressure, temperature, vol_conc_small_part, vol_conc_large_part
+export salinity, pressure, temperature, vol_conc_small_part, vol_conc_large_part, radiation_length
 export get_refractive_index, get_scattering_length, get_absorption_length
 export MediumProperties, WaterProperties
 
-@unit ppm "ppm" Partspermillion  1//1000000 false
+@unit ppm "ppm" Partspermillion 1 // 1000000 false
 Unitful.register(Medium)
 
-abstract type MediumProperties{T} end
+abstract type MediumProperties end
 
 
 """
     WaterProperties(salinity, presure, temperature, vol_conc_small_part, vol_conc_large_part)
 
-Properties for a water-like medium. Use unitful constructor to creata a value of this type.
+Properties for a water-like medium. Use unitful constructor to creat a value of this type.
 """
-struct WaterProperties{T} <: MediumProperties{T}
-    salinity::T # permille
-    pressure::T # atm
-    temperature::T #°C
-    vol_conc_small_part::T # ppm
-    vol_conc_large_part::T # ppm
+struct WaterProperties <: MediumProperties
+    salinity::Float64 # permille
+    pressure::Float64 # atm
+    temperature::Float64 #°C
+    vol_conc_small_part::Float64 # ppm
+    vol_conc_large_part::Float64
+    radiation_length::Float64 # g / cm^2
 
-    WaterProperties(::T, ::T, ::T, ::T, ::T) where T = error("Use unitful constructor")
+    WaterProperties(::Float64, ::Float64, ::Float64, ::Float64, ::Float64, ::Float64) = error("Use unitful constructor")
 
     function WaterProperties(
-        salinity::Unitful.DimensionlessQuantity{T},
-        pressure::Unitful.Pressure{T},
-        temperature::Unitful.Temperature{T},
-        vol_conc_small_part::Unitful.DimensionlessQuantity{T},
-        vol_conc_large_part::Unitful.DimensionlessQuantity{T}) where {T <: Real}
-    
-        new{T}(
-            ustrip(T, u"permille", salinity),
-            ustrip(T, u"atm", pressure),
-            ustrip(T, u"°C", temperature),
-            ustrip(T, u"ppm", vol_conc_small_part),
-            ustrip(T, u"ppm", vol_conc_large_part)
-            )
+        salinity::Unitful.DimensionlessQuantity,
+        pressure::Unitful.Pressure,
+        temperature::Unitful.Temperature,
+        vol_conc_small_part::Unitful.DimensionlessQuantity,
+        vol_conc_large_part::Unitful.DimensionlessQuantity,
+        radiation_length::typeof(1.0u"g/cm^2")
+    )
+        new(
+            ustrip(u"permille", salinity),
+            ustrip(u"atm", pressure),
+            ustrip(u"°C", temperature),
+            ustrip(u"ppm", vol_conc_small_part),
+            ustrip(u"ppm", vol_conc_large_part),
+            ustrip(u"g/cm^2", radiation_length)
+        )
     end
 end
 
@@ -48,14 +51,44 @@ make_cascadia_medium_properties(T::Type) = WaterProperties(
     T(269.44088)u"bar",
     T(1.8)u"°C",
     T(0.0075)u"ppm",
-    T(0.0075)u"ppm")
+    T(0.0075)u"ppm",
+    T(36.08)u"g/cm^2")
 
-salinity(x::MediumProperties) = x.salinity
-pressure(x::MediumProperties) = x.pressure
-temperature(x::MediumProperties) = x.temperature
-vol_conc_small_part(x::MediumProperties) = x.vol_conc_small_part
-vol_conc_large_part(x::MediumProperties) = x.vol_conc_large_part
 
+
+@with_kw struct DIPPR105Params
+    A::Float64
+    B::Float64
+    C::Float64
+    D::Float64
+end
+
+# http://ddbonline.ddbst.de/DIPPR105DensityCalculation/DIPPR105CalculationCGI.exe?component=Water
+DDBDIPR105Params = DIPPR105Params(A=0.14395, B=0.0112, C=649.727, D=0.05107)
+
+DIPPR105(temperature::Unitful.Temperature, params::DIPPR105Params=DDBDIPR105Params) = 1u"kg/m^3" * A / B^(1 + (1 - ustrip(u"K", temperature) / C)^D)
+
+salinity(::T) where {T<:MediumProperties} = error("Not implemented for $T")
+salinity(x::WaterProperties) = x.salinity
+
+pressure(::T) where {T<:MediumProperties} = error("Not implemented for $T")
+pressure(x::WaterProperties) = x.pressure
+
+temperature(::T) where {T<:MediumProperties} = error("Not implemented for $T")
+temperature(x::WaterProperties) = x.temperature
+
+density(::T) where {T<:MediumProperties} = error("Not implemented for $T")
+density(x::WaterProperties) = DIPPR105(temperature(x))#
+
+vol_conc_small_part(::T) where {T<:MediumProperties} = error("Not implemented for $T")
+vol_conc_small_part(x::WaterProperties) = x.vol_conc_small_part
+
+
+vol_conc_large_part(::T) where {T<:MediumProperties} = error("Not implemented for $T")
+vol_conc_large_part(x::WaterProperties) = x.vol_conc_large_part
+
+radiation_length(::T) where {T<:MediumProperties} = error("Not implemented for $T")
+radiation_length(x::WaterProperties) = x.radiation_length
 
 """
 get_refractive_index_fry(wavelength, salinity, temperature, pressure)
@@ -79,11 +112,11 @@ get_refractive_index_fry(wavelength, salinity, temperature, pressure)
 """
 
 function get_refractive_index_fry(
-        wavelength::T;
-        salinity::Real,
-        temperature::Real,
-        pressure::Real) where {T <: Real}
-    
+    wavelength::T;
+    salinity::Real,
+    temperature::Real,
+    pressure::Real) where {T<:Real}
+
     n0 = 1.31405
     n1 = 1.45e-5
     n2 = 1.779e-4
@@ -98,9 +131,12 @@ function get_refractive_index_fry(
 
     a01 = (
         n0
-        + (n2 - n3 * temperature + n4 * temperature^2) * salinity
-        - n5 * temperature^2
-        + n1 * pressure
+        +
+        (n2 - n3 * temperature + n4 * temperature^2) * salinity
+        -
+        n5 * temperature^2
+        +
+        n1 * pressure
     )
     a2 = n6 + n7 * salinity - n8 * temperature
     a3 = -n9
@@ -114,14 +150,14 @@ function get_refractive_index_fry(
     wavelength::Unitful.Length{T};
     salinity::Unitful.DimensionlessQuantity,
     temperature::Unitful.Temperature,
-    pressure::Unitful.Pressure) where {T <:Real}
-    
+    pressure::Unitful.Pressure) where {T<:Real}
+
     get_refractive_index_fry(
         ustrip(T, u"nm", wavelength),
         salinity=ustrip(u"permille", salinity),
         temperature=ustrip(u"°C", temperature),
         pressure=ustrip(u"atm", pressure)
-        )
+    )
 end
 
 """
@@ -130,14 +166,14 @@ end
     Return the refractive index at wavelength for medium
 """
 get_refractive_index(wavelength::Real, medium::WaterProperties) = get_refractive_index_fry(
-        wavelength,
-        salinity=salinity(medium),
-        temperature=temperature(medium),
-        pressure=pressure(medium)) 
+    wavelength,
+    salinity=salinity(medium),
+    temperature=temperature(medium),
+    pressure=pressure(medium))
 
 get_refractive_index(wavelength::Unitful.Length, medium::MediumProperties) = get_refractive_index(
-        ustrip(u"nm", wavelength),
-        medium)
+    ustrip(u"nm", wavelength),
+    medium)
 
 
 
@@ -151,7 +187,7 @@ get_sca_len_part_conc(wavelength; vol_conc_small_part, vol_conc_large_part)
 
     Adapted from clsim ©Claudio Kopper
 """
-@inline function get_sca_len_part_conc(wavelength::T; vol_conc_small_part::Real, vol_conc_large_part::Real) where {T <: Real}
+@inline function get_sca_len_part_conc(wavelength::T; vol_conc_small_part::Real, vol_conc_large_part::Real) where {T<:Real}
 
     ref_wlen::T = 550  # nm
     x = ref_wlen / wavelength
@@ -185,12 +221,12 @@ Return the scattering length for a given wavelength and medium
 
 @inline function get_scattering_length(wavelength::Real, medium::WaterProperties)
     get_sca_len_part_conc(wavelength, vol_conc_small_part=vol_conc_small_part(medium), vol_conc_large_part=vol_conc_large_part(medium))
-end 
+end
 
 
 function get_scattering_length(wavelength::Unitful.Length, medium::MediumProperties)
     get_scattering_length(ustrip(u"nm", wavelength), medium)
-end 
+end
 
 
 function get_absorption_length(wavelength::Real, medium::WaterProperties)

@@ -8,114 +8,19 @@ using SpecialFunctions
 
 include("medium.jl")
 include("spectrum.jl")
-include("photon_source.jl")
+include("emission.jl")
+include("lightyield.jl")
+
 
 export cuda_propagate_photons!, initialize_photon_arrays, process_output
 export cherenkov_ang_dist, cherenkov_ang_dist_int
 export PhotonTarget
-export Medium, Spectral, PhotonSource
+export Medium, Spectral, Emission, LightYield
 
 using .Medium
 using .Spectral
-using .PhotonSource
+using .Emission
 
-struct CherenkovAngDistParameters{T <: Real}
-    a::T
-    b::T
-    c::T
-    d::T    
-end
-
-# params for e-
-STD_ANG_DIST_PARS = CherenkovAngDistParameters(4.27033, -6.02527, 0.29887,-0.00103)
-
-
-
-"""
-cherenkov_ang_dist(costheta, ref_index)
-
-    Angular distribution of cherenkov photons for EM cascades.
-
-    Taken from https://arxiv.org/pdf/1210.5140.pdf
-"""
-function cherenkov_ang_dist(
-    costheta::Real,
-    ref_index::Real,
-    ang_dist_pars::CherenkovAngDistParameters=STD_ANG_DIST_PARS)
-    
-    cos_theta_c = 1 / ref_index
-    a = ang_dist_pars.a
-    b = ang_dist_pars.b
-    c = ang_dist_pars.c
-    d = ang_dist_pars.d
-
-    return a * exp(b * abs(costheta - cos_theta_c)^ c) + d
-end
-
-
-"""
-    cherenkov_ang_dist_int(ref_index, lower, upper, ang_dist_pars)
-
-Integral of the cherenkov angular distribution function.
-"""
-
-function cherenkov_ang_dist_int(
-    ref_index::Real,
-    lower::Real=-1.,
-    upper::Real=1,
-    ang_dist_pars::CherenkovAngDistParameters=STD_ANG_DIST_PARS)
-    
-    a = ang_dist_pars.a
-    b = ang_dist_pars.b
-    c = ang_dist_pars.c
-    d = ang_dist_pars.d
-
-    cos_theta_c = 1.0 / ref_index
-
-    function indef_int(x)
-        
-        function lower_branch(x, cos_theta_c)
-            return (
-                1
-                / c
-                * (
-                    c * d * x
-                    + (
-                        a
-                        * (cos_theta_c - x)
-                        * gamma(1 / c, -(b * (cos_theta_c - x) ^ c))
-                    )
-                    * (-(b * (cos_theta_c - x) ^ c)) ^ (-1 / c)
-                )
-            )
-        end
-
-        function upper_branch(x, cos_theta_c)
-            return (
-                1 / c
-                * (
-                    c * d * x
-                    + (
-                        a
-                        * (cos_theta_c - x)
-                        * gamma(1 / c, -(b * (-cos_theta_c + x) ^ c))
-                    )
-                    * (-(b * (-cos_theta_c + x) ^ c)) ^ (-1 / c)
-                )
-            )
-        end
-
-        peak_val = lower_branch(cos_theta_c - 1e-5, cos_theta_c)
-
-        if x <= cos_theta_c
-            return lower_branch(x, cos_theta_c)
-        else
-            return upper_branch(x, cos_theta_c) + 2 * peak_val
-        end
-    end
-
-    return indef_int(upper) - indef_int(lower)
-end
 
 @inline function uniform(minval::T, maxval::T) where {T}
     uni = rand(T)
@@ -156,13 +61,13 @@ end
     sph_to_cart(theta, phi)
 end
 
-function cuda_fast_linear_interp(x::T, knots::AbstractVector{T}, lower::T, upper::T) where T
+function cuda_fast_linear_interp(x::T, knots::AbstractVector{T}, lower::T, upper::T) where {T}
     # assume equidistant
 
     x = CUDA.clamp(x, lower, upper)
     range = upper - lower
     n_knots = size(knots, 1)
-    step_size = range / (n_knots-1)
+    step_size = range / (n_knots - 1)
 
     along_range = (x - lower) / step_size
     along_range_floor = CUDA.floor(along_range)
@@ -171,10 +76,10 @@ function cuda_fast_linear_interp(x::T, knots::AbstractVector{T}, lower::T, upper
     if lower_knot == n_knots
         return @inbounds knots[end]
     end
-    
+
     along_step = along_range - along_range_floor
-    @inbounds y_low = knots[lower_knot]   
-    @inbounds slope = (knots[lower_knot + 1] - y_low) 
+    @inbounds y_low = knots[lower_knot]
+    @inbounds slope = (knots[lower_knot+1] - y_low)
 
     interpolated = y_low + slope * along_step
 
@@ -183,13 +88,13 @@ end
 
 
 
-@inline initialize_direction(::T) where {T<:EmissionProfile} = throw(ArgumentError("Cannot initialize $T"))
-@inline initialize_direction(::Isotropic{T}) where {T} = initialize_direction_isotropic(T)
+@inline initialize_direction(::AngularEmissionProfile{U,T}) where {U,T} = throw(ArgumentError("Cannot initialize $U"))
+@inline initialize_direction(::AngularEmissionProfile{:IsotropicEmission,T}) where {T} = initialize_direction_isotropic(T)
 
 @inline initialize_wavelength(::T) where {T<:Spectrum} = throw(ArgumentError("Cannot initialize $T"))
 @inline initialize_wavelength(spectrum::Monochromatic{T}) where {T} = spectrum.wavelength
 
-@inline function initialize_wavelength(spectrum::Cherenkov{T}) where {T}
+@inline function initialize_wavelength(spectrum::CherenkovSpectrum{T}) where {T}
     cuda_fast_linear_interp(rand(T), spectrum.knots, T(0), T(1))
 end
 
@@ -283,7 +188,7 @@ function rodrigues_rotation(a, b, operand)
     axnorm = norm(ax)
     ax = ax ./ axnorm
     theta = asin(axnorm)
-    rotated = operand .* cos(theta) + (cross(ax, operand) .* sin(theta)) +  (ax .* (1-cos(theta)) .* dot(ax, operand))
+    rotated = operand .* cos(theta) + (cross(ax, operand) .* sin(theta)) + (ax .* (1 - cos(theta)) .* dot(ax, operand))
     return rotated
 end
 
@@ -503,7 +408,7 @@ end
 
 
 
-function process_output(output::AbstractVector{T}, stack_pointers::AbstractVector{U}) where {T, U<:Integer, N}
+function process_output(output::AbstractVector{T}, stack_pointers::AbstractVector{U}) where {T,U<:Integer,N}
     out_size = size(output, 1)
     stack_len = Int64(out_size / size(stack_pointers, 1))
 
@@ -517,7 +422,7 @@ function process_output(output::AbstractVector{T}, stack_pointers::AbstractVecto
         coalesced[ix:ix+this_len-1, :] = output[stack_starts[i]:sp]
         #println("$(stack_starts[i]:sp) to $(ix:ix+this_len-1)")
         ix += this_len
-        
+
     end
     coalesced
 end

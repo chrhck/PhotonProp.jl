@@ -5,6 +5,8 @@ using CUDA
 using Random
 include("photon_prob_cuda.jl")
 
+using .PhotonPropagation
+
 Random.seed!(0)
 @testset "random numbers" begin
     a = 2.0
@@ -49,21 +51,21 @@ end
     @test norm(Vector(result)[1]) ≈ 1.0
 
     cos_theta = cuda_hg_scattering_func(0.97)
-    phi = uniform(0., 2 * pi)
+    phi = uniform(0.0, 2 * pi)
 
     new_dir = sph_to_cart(acos(cos_theta), phi)
     @cuda apply_rot(CuVector([old_dir]), CuVector([new_dir]), result)
 
     rotated = Vector(result)[1]
 
-    rotated2 = rodrigues_rotation(@SVector[0, 0, 1.], old_dir, new_dir)
+    rotated2 = rodrigues_rotation(@SVector[0, 0, 1.0], old_dir, new_dir)
     @test rotated ≈ rotated2
 end
 
 @testset "position update" begin
-    p = @SVector[0., 0., 0.]
-    a = @SVector[0., 1., 0.]
-   
-    @test update_position(p, a, 10.) ≈ @SVector[0, 10., 0]    
+    p = @SVector[0.0, 0.0, 0.0]
+    a = @SVector[0.0, 1.0, 0.0]
+
+    @test update_position(p, a, 10.0) ≈ @SVector[0, 10.0, 0]
 
 end

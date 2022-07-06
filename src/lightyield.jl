@@ -1,28 +1,19 @@
 module LightYield
 
-export LongitudinalParametersEMinus, LongitudinalParametersEPlus, LongitudinalParametersGamma
+export LongitudinalParameters, LongitudinalParametersEMinus, LongitudinalParametersEPlus, LongitudinalParametersGamma
 export MediumPropertiesWater, MediumPropertiesIce
-export CherenkovTrackLengthParametersEMinus, CherenkovTrackLengthParametersEPlus, CherenkovTrackLengthParametersGamma
-export longitudinal_profile, cherenkov_track_length, cherenkov_counts
+export CherenkovTrackLengthParameters, CherenkovTrackLengthParametersEMinus, CherenkovTrackLengthParametersEPlus, CherenkovTrackLengthParametersGamma
+export longitudinal_profile, cherenkov_track_length, cherenkov_counts, fractional_contrib_long
 
-using Parameters:@with_kw
-using SpecialFunctions:gamma
+using Parameters: @with_kw
+using SpecialFunctions: gamma
 using StaticArrays
 using QuadGK
 using Unitful
 using PhysicalConstants.CODATA2018
-using ..PhotonSource
-
-
-@with_kw struct MediumProperties
-    ref_ix::Float64
-    density::Float64
-    rad_len::Float64
-end
-
-MediumPropertiesWater = MediumProperties(ref_ix=1.333, density=1.0u"g/cm^3", rad_len=36.08u"g*cm^2")
-MediumPropertiesIce = MediumProperties(ref_ix=1.309, density=0.9180"g/cm^3", rad_len=36.08u"g*cm^2")
-
+using ..Emission
+using ..Spectral
+using ..Medium
 
 @with_kw struct LongitudinalParameters
     alpha::Float64
@@ -36,111 +27,88 @@ LongitudinalParametersGamma = LongitudinalParameters(alpha=2.83923, beta=1.34031
 
 
 @with_kw struct CherenkovTrackLengthParameters
-    alpha::Float64
+    alpha::typeof(1.0u"cm")
     beta::Float64
-    alpha_dev::Float64
+    alpha_dev::typeof(1.0u"cm")
     beta_dev::Float64
 end
 
 CherenkovTrackLengthParametersEMinus = CherenkovTrackLengthParameters(
-    alpha=532.07078881,
+    alpha=532.07078881u"cm",
     beta=1.00000211,
-    alpha_dev=5.78170887,
+    alpha_dev=5.78170887u"cm",
     beta_dev=0.5
 )
 
 CherenkovTrackLengthParametersEPlus = CherenkovTrackLengthParameters(
-    alpha=532.11320598,
+    alpha=532.11320598u"cm",
     beta=0.99999254,
-    alpha_dev=5.73419669,
+    alpha_dev=5.73419669u"cm",
     beta_dev=0.5
 )
 
 CherenkovTrackLengthParametersGamma = CherenkovTrackLengthParameters(
-    alpha=532.08540905,
+    alpha=532.08540905u"cm",
     beta=0.99999877,
-    alpha_dev=5.78170887,
+    alpha_dev=5.78170887u"cm",
     beta_dev=5.66586567
 )
 
 
-parameter_a(energy::Real, alpha::Real, beta::Real) = alpha + beta * log10(energy)
 
-
-parameter_a(
+function long_parameter_a_edep(
     energy::Unitful.Energy,
     long_pars::LongitudinalParameters
-) = parameter_a(ustrip(u"GeV", energy), long_pars.alpha, long_pars.beta)
+)
+    long_pars.alpha + long_pars.beta * log10(ustrip(u"GeV", energy))
+end
+
+long_parameter_b_edep(::Unitful.Energy, long_pars::LongitudinalParameters) = long_pars.b
 
 
-parameter_b(energy::Real, b::Real) = b
-
-parameter_b(
-    energy::Unitful.Energy,
-    long_pars::LongitudinalParameters
-    ) = parameter_b(ustrip(u"GeV", energy), long_pars.b)
-    
-
-
-function longitudinal_profile(energy::Real, z::Real, rad_len::Real, density::Real)
-
-function longitudinal_profile(energy::Real, z::Real, medium::MediumProperties, long_pars::LongitudinalParameters) 
-    lrad = medium.rad_len / medium.density 
+function longitudinal_profile(
+    energy::Unitful.Energy{T}, z::Unitful.Length{T}, medium::MediumProperties, long_pars::LongitudinalParameters) where {T<:Real}
+    lrad = radiation_length(medium) / density(medium)
     t = z / lrad
-    b = parameter_b(energy, long_pars)
-    a = parameter_a(energy, long_pars)
-    
-    b * ((t * b)^(a - 1.) * exp(-(t*b)) / gamma(a))
+    b = long_parameter_b_edep(energy, long_pars)
+    a = long_parameter_a_edep(energy, long_pars)
+
+    b * ((t * b)^(a - 1.0) * exp(-(t * b)) / gamma(a))
 end
 
 function fractional_contrib_long(
-    energy::Real,
+    energy::Unitful.Energy,
     z_grid::AbstractVector{T},
     medium::MediumProperties,
     long_pars::LongitudinalParameters,
-    ) where {T <: Real}
+) where {T<:Unitful.Length}
 
     int_range = extrema(z_grid)
     norm = quadgk(
-        z-> longitudinal_profile(energy, z, medium, long_pars),
+        z -> longitudinal_profile(energy, z, medium, long_pars),
         int_range[1], int_range[2])[1]
 
     part_contribs = Vector{Float64}(undef, size(z_grid, 1))
     part_contribs[1] = 0
-    @inbounds for i in 1:size(int_grid, 1)-1
-        lower = int_grid[i]
-        upper = int_grid[i+1]
+    @inbounds for i in 1:size(z_grid, 1)-1
         part_contribs[i+1] = (
-            1/norm * 
+            1 / norm *
             quadgk(
-                z-> longitudinal_profile(energy, z, medium, long_pars),
-                lower, upper)[1]
+                z -> longitudinal_profile(energy, z, medium, long_pars),
+                z_grid[i], z_grid[i+1])[1]
         )
     end
     part_contribs
 end
 
 
-function cherenkov_track_length_dev(energy, track_len_params::CherenkovTrackLengthParameters)
-    track_len_params.alpha_dev * energy^track_len_params.beta
+function cherenkov_track_length_dev(energy::Unitful.Energy, track_len_params::CherenkovTrackLengthParameters)
+    track_len_params.alpha_dev * ustrip(u"GeV", energy)^track_len_params.beta_dev
 end
 
-function cherenkov_track_length(energy, track_len_params::CherenkovTrackLengthParameters)
-    track_len_params.alpha * energy^track_len_params.beta 
+function cherenkov_track_length(energy::Unitful.Energy, track_len_params::CherenkovTrackLengthParameters)
+    track_len_params.alpha * ustrip(u"GeV", energy)^track_len_params.beta
 end
-
-function cherenkov_counts(wavelength::Real, track_length::Real, medium::MediumProperties)
-
-    alpha_em = 0.0072973525693
-    charge = 1.
-
-    prefac = 2 * pi * alpha_em * charge^2 / (1 - 1 / medium.ref_ix^2)
-
-    # 1e-7 due to the conversion from nm to cm
-    diff_counts = prefac / (wavelength * 1e-9)^2. * track_length * 1e-2
-    diff_counts * 1e-9 / pi
-end
-
 
 @enum ParticleType begin
     EMinus = 11
@@ -149,36 +117,77 @@ end
 end
 
 mutable struct Particle{T}
-    position::SVector{3, T}
+    position::SVector{3,T}
     time::T
     energy::T
     type::ParticleType
 end
 
-function make_elongated_cascade_sources(
-    particle::Particle{T}
-    range::Tuple{T, T},
+function particle_to_lightsource(
+    particle::Particle{T},
+    medium::MediumProperties,
+    long_params::LongitudinalParameters,
+    wl_range::Tuple{Unitful.Length{T},Unitful.Length{T}}
+) where {T<:Real}
+
+    total_contrib = (
+        frank_tamm_norm(wl_range, wl -> medium.ref_ix) *
+        cherenkov_track_length.(particle.energy * 1u"GeV", track_len_params)
+    )
+
+
+    PhotonSource(
+        particle.position,
+        particle.direction,
+        particle.time,
+        total_contrib,
+        CherenkovSpectrum,
+        AngularEmissionProfile{:CherenkovAngularEmission})
+
+
+end
+
+function particle_to_elongated_lightsource(
+    particle::Particle{T},
+    range::Tuple{Unitful.Length{T},Unitful.Length{T}},
     precision::T,
     medium::MediumProperties,
-    long_params::LongitudinalParameters
-    ) where {T <: Real}
+    long_params::LongitudinalParameters,
+    track_len_params::CherenkovTrackLengthParameters,
+    wl_range::Tuple{Unitful.Length{T},Unitful.Length{T}}
+) where {T<:Real}
 
     s = SobolSeq([range[1]], [range[2]])
     n_steps = Int64(ceil(range[2] - range[1]) / precision)
     int_grid = sort!(vec(reduce(hcat, next!(s) for i in 1:n_steps)))
 
-    fractional_contrib = fractional_contrib_long(particle.energy, int_grid, medium, long_params)
+    fractional_contrib = fractional_contrib_long(particle.energy * 1u"GeV", int_grid, medium, long_params)
+    total_contrib = (
+        frank_tamm_norm(wl_range, wl -> medium.ref_ix) *
+        cherenkov_track_length.(particle.energy * 1u"GeV", track_len_params)
+    )
 
-    sources = Vector{PhotonSource}(undef, n_steps-1)
+    sources = Vector{PhotonSource}(undef, n_steps - 1)
+    spectrum = CherenkovSpectrum(wl_range, 20, medium)
 
     pos_along = 0.5 .* (int_grid[1:end-1] .+ int_grid[2:end])
 
-    for i in range 2:n_steps
-        this_pos = particle.pos .+ pos_along .* particle.direction
-        this_time
-        
-    
+    for i in 2:n_steps
+        this_pos = particle.pos .+ ustrip(u"m", pos_along) .* particle.direction
+        this_time = particle.time + ustrip("ns", pos_along / SpeedOfLightInVacuum)
+
+        this_src = PhotonSource(
+            this_pos,
+            particle.direction,
+            this_time,
+            total_contrib * fractional_contrib[i],
+            spectrum,
+            AngularEmissionProfile{:CherenkovAngularEmission})
+
+        sources[i-1] = this_src
     end
+
+    sources
 end
 
 
