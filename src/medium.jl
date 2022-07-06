@@ -2,7 +2,7 @@ module Medium
 using Unitful
 using Parameters: @with_kw
 export make_cascadia_medium_properties
-export salinity, pressure, temperature, vol_conc_small_part, vol_conc_large_part, radiation_length
+export salinity, pressure, temperature, vol_conc_small_part, vol_conc_large_part, radiation_length, density
 export get_refractive_index, get_scattering_length, get_absorption_length
 export MediumProperties, WaterProperties
 

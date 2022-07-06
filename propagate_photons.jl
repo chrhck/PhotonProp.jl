@@ -43,7 +43,7 @@ plot!(zs, longitudinal_profile.(Ref(1E5u"GeV"), zs, Ref(medium), Ref(Longitudina
 frac_contrib = fractional_contrib_long(1E5u"GeV", zs, MediumPropertiesWater, LongitudinalParametersEMinus)
 
 plot(zs, frac_contrib, linetype=:steppost)
-sum(frac_contrib) 
+ressum(frac_contrib) 
 
 tlens = cherenkov_track_length.((10 .^log_energies)u"GeV", Ref(CherenkovTrackLengthParametersEMinus))
 
