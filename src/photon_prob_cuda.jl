@@ -5,21 +5,27 @@ using LinearAlgebra
 using CUDA
 using Random
 using SpecialFunctions
+using DataFrames
+using Unitful
+using PhysicalConstants.CODATA2018
 
 include("medium.jl")
 include("spectrum.jl")
 include("emission.jl")
 include("lightyield.jl")
+include("detection.jl")
 
 
 export cuda_propagate_photons!, initialize_photon_arrays, process_output
 export cherenkov_ang_dist, cherenkov_ang_dist_int
-export PhotonTarget
-export Medium, Spectral, Emission, LightYield
+export propagate_distance
+
+export Medium, Spectral, Emission, Detection, LightYield
 
 using .Medium
 using .Spectral
 using .Emission
+using .Detection
 
 
 @inline function uniform(minval::T, maxval::T) where {T}
@@ -35,13 +41,6 @@ end
     costheta::T = (1 / (2 * g) * (CUDA.fma(g, g, 1) - (CUDA.fma(-g, g, 1) / (CUDA.fma(g, (CUDA.fma(2, eta, -1)), 1)))^2))
     CUDA.clamp(costheta, T(-1), T(1))
 end
-
-struct PhotonTarget{T<:Real}
-    position::SVector{3,T}
-    radius::T
-end
-
-
 
 
 @inline function sph_to_cart(theta::T, phi::T) where {T}
@@ -291,7 +290,7 @@ function cuda_propagate_photons!(
     out_stack_pointers::CuDeviceVector{Int32},
     out_n_ph_simulated::CuDeviceVector{Int64},
     stack_len::Int32,
-    seed::Int32,
+    seed::Int64,
     ::Val{source},
     target_pos::SVector{3,T},
     target_r::T,
@@ -321,6 +320,7 @@ function cuda_propagate_photons!(
 
     safe_margin = max(0, (blockdim - warpsize))
     n_photons_simulated = Int64(0)
+
     @inbounds for i in 1:this_n_photons
 
         if cache[1] > (ix_offset + stack_len - safe_margin)
@@ -336,6 +336,7 @@ function cuda_propagate_photons!(
         dist_travelled = T(0)
 
         sca_len::T = get_scattering_length(wavelength, medium)
+
 
         steps::Int32 = 10
         for nstep in Int32(1):steps
@@ -602,8 +603,55 @@ function make_bench_cuda_step_photons!(N)
     bench
 end
 
+function propagate_distance(distance::Float32, medium::MediumProperties, n_ph_gen::Int64)
 
+    target_radius = 0.21f0
+    source = PhotonSource(
+        @SVector[0.0f0, 0.0f0, 0.0f0],
+        @SVector[0.0f0, 0.0f0, 1.0f0],
+        0.0f0,
+        n_ph_gen,
+        CherenkovSpectrum((300.0f0, 800.0f0), 20, medium),
+        AngularEmissionProfile{:IsotropicEmission,Float32}(),)
+    target = DetectionSphere(@SVector[0.0f0, 0.0f0, distance], target_radius)
 
+    threads = 1024
+    blocks = 16
 
+    stack_len = Int32(cld(1E5, blocks))
+
+    positions, directions, wavelengths, dist_travelled, stack_idx, n_ph_sim = initialize_photon_arrays(stack_len, blocks, Float32)
+
+    @cuda threads = threads blocks = blocks shmem = sizeof(Int32) cuda_propagate_photons!(
+        positions, directions, wavelengths, dist_travelled, stack_idx, n_ph_sim, stack_len, Int64(0),
+        Val(source), target.position, target.radius, Val(medium))
+
+    distt = process_output(Vector(dist_travelled), Vector(stack_idx))
+    wls = process_output(Vector(wavelengths), Vector(stack_idx))
+    directions = process_output(Vector(directions), Vector(stack_idx))
+
+    abs_weight = convert(Vector{Float64}, exp.(-distt ./ get_absorption_length.(wls, Ref(medium))))
+
+    ref_ix = get_refractive_index.(wls, Ref(medium))
+    c_vac = ustrip(u"m/ns", SpeedOfLightInVacuum)
+    c_n = (c_vac ./ ref_ix)
+
+    photon_times = distt ./ c_n
+    tgeo = (distance - target_radius) ./ (c_vac / get_refractive_index(800.0, medium))
+    tres = (photon_times .- tgeo)
+    thetas = map(dir -> acos(dir[3]), directions)
+
+    DataFrame(tres=tres, theta=thetas, ref_ix=ref_ix, abs_weight=abs_weight)
+end
+
+function _init_workaround()
+    println("Doing initial prop")
+    medium = make_cascadia_medium_properties(Float32)
+    propagate_distance(10.0f0, medium, 100)
+    nothing
+end
+
+# needed if we later load flux, maybe solved in the future...?
+_init_workaround()
 
 end # module

@@ -9,7 +9,7 @@ export MediumProperties, WaterProperties
 @unit ppm "ppm" Partspermillion 1 // 1000000 false
 Unitful.register(Medium)
 
-abstract type MediumProperties end
+abstract type MediumProperties{T} end
 
 
 """
@@ -17,31 +17,31 @@ abstract type MediumProperties end
 
 Properties for a water-like medium. Use unitful constructor to creat a value of this type.
 """
-struct WaterProperties <: MediumProperties
-    salinity::Float64 # permille
-    pressure::Float64 # atm
-    temperature::Float64 #°C
-    vol_conc_small_part::Float64 # ppm
-    vol_conc_large_part::Float64
-    radiation_length::Float64 # g / cm^2
+struct WaterProperties{T} <: MediumProperties{T}
+    salinity::T # permille
+    pressure::T # atm
+    temperature::T #°C
+    vol_conc_small_part::T # ppm
+    vol_conc_large_part::T
+    radiation_length::T # g / cm^2
 
-    WaterProperties(::Float64, ::Float64, ::Float64, ::Float64, ::Float64, ::Float64) = error("Use unitful constructor")
+    WaterProperties(::T, ::T, ::T, ::T, ::T, ::T) where {T} = error("Use unitful constructor")
 
     function WaterProperties(
-        salinity::Unitful.DimensionlessQuantity,
-        pressure::Unitful.Pressure,
-        temperature::Unitful.Temperature,
-        vol_conc_small_part::Unitful.DimensionlessQuantity,
-        vol_conc_large_part::Unitful.DimensionlessQuantity,
-        radiation_length::typeof(1.0u"g/cm^2")
-    )
-        new(
-            ustrip(u"permille", salinity),
-            ustrip(u"atm", pressure),
-            ustrip(u"°C", temperature),
-            ustrip(u"ppm", vol_conc_small_part),
-            ustrip(u"ppm", vol_conc_large_part),
-            ustrip(u"g/cm^2", radiation_length)
+        salinity::Unitful.Quantity{T},
+        pressure::Unitful.Quantity{T},
+        temperature::Unitful.Quantity{T},
+        vol_conc_small_part::Unitful.Quantity{T},
+        vol_conc_large_part::Unitful.Quantity{T},
+        radiation_length::Unitful.Quantity{T}
+    ) where {T}
+        new{T}(
+            ustrip(T, u"permille", salinity),
+            ustrip(T, u"atm", pressure),
+            ustrip(T, u"°C", temperature),
+            ustrip(T, u"ppm", vol_conc_small_part),
+            ustrip(T, u"ppm", vol_conc_large_part),
+            ustrip(T, u"g/cm^2", radiation_length)
         )
     end
 end
@@ -66,7 +66,7 @@ end
 # http://ddbonline.ddbst.de/DIPPR105DensityCalculation/DIPPR105CalculationCGI.exe?component=Water
 DDBDIPR105Params = DIPPR105Params(A=0.14395, B=0.0112, C=649.727, D=0.05107)
 
-DIPPR105(temperature::Unitful.Temperature, params::DIPPR105Params=DDBDIPR105Params) = 1u"kg/m^3" * A / B^(1 + (1 - ustrip(u"K", temperature) / C)^D)
+DIPPR105(temperature::Unitful.Temperature, params::DIPPR105Params=DDBDIPR105Params) = 1u"kg/m^3" * params.A / params.B^(1 + (1 - ustrip(u"K", temperature) / params.C)^params.D)
 
 salinity(::T) where {T<:MediumProperties} = error("Not implemented for $T")
 salinity(x::WaterProperties) = x.salinity
@@ -78,7 +78,7 @@ temperature(::T) where {T<:MediumProperties} = error("Not implemented for $T")
 temperature(x::WaterProperties) = x.temperature
 
 density(::T) where {T<:MediumProperties} = error("Not implemented for $T")
-density(x::WaterProperties) = DIPPR105(temperature(x))#
+density(x::WaterProperties) = ustrip(u"kg/m^3", DIPPR105(temperature(x)u"K"))
 
 vol_conc_small_part(::T) where {T<:MediumProperties} = error("Not implemented for $T")
 vol_conc_small_part(x::WaterProperties) = x.vol_conc_small_part

@@ -37,7 +37,7 @@ Calculate number of Cherenkov photons in interval `wl_range`.
 If `wl_range` is unitles, assumes it's given in nm
 """
 function frank_tamm_norm(wl_range::Tuple{Unitful.Length{T},Unitful.Length{T}}, ref_index_func::Function) where {T<:Real}
-    quadgk(x -> frank_tamm(x, ref_index_func(x)), wl_range[1], wl_range[2])[1] * 1u"cm" |> NoUnits
+    quadgk(x -> frank_tamm(x, ref_index_func(x)), wl_range[1], wl_range[2])[1]
 end
 
 frank_tamm_norm(wl_range::Tuple{Real,Real}, ref_index_func::Function) = frank_tamm_norm(wl_range .* 1u"nm", ref_index_func)
@@ -88,20 +88,20 @@ struct CherenkovSpectrum{T<:Real,N} <: Spectrum
     wl_range::Tuple{T,T}
     knots::SVector{N,T}
 
-    Cherenkov(::Tuple{T,T}, ::SVector{N,T}) where {T<:Real,N<:Integer} = error("default constructor disabled")
+    CherenkovSpectrum(::Tuple{T,T}, ::SVector{N,T}) where {T<:Real,N<:Integer} = error("default constructor disabled")
 
-    function Cherenkov(wl_range::Tuple{T,T}, interp_steps::U, medium::V) where {T<:Real,U<:Integer,V<:MediumProperties}
+    function CherenkovSpectrum(wl_range::Tuple{T,T}, interp_steps::U, medium::V) where {T<:Real,U<:Integer,V<:MediumProperties}
         spec = CherenkovSpectralDist(wl_range, medium)
         eval_knots = range(T(0), T(1), interp_steps)
         knots = SVector{interp_steps,T}(spec.interpolation(eval_knots))
         return new{T,interp_steps}(wl_range, knots)
     end
 
-    function Cherenkov(
+    function CherenkovSpectrum(
         wl_range::Tuple{Unitful.Length{T},Unitful.Length{T}},
         interp_steps::U,
         medium::V) where {T<:Real,U<:Integer,V<:MediumProperties}
-        Cherenkov((ustrip(u"nm", wl_range[1]), ustrip(u"nm", wl_range[2])), interp_steps, medium)
+        CherenkovSpectrum((ustrip(u"nm", wl_range[1]), ustrip(u"nm", wl_range[2])), interp_steps, medium)
     end
 
 end
