@@ -1,4 +1,4 @@
-module PhotonPropagation
+module PhotonPropagationCuda
 using StaticArrays
 using BenchmarkTools
 using LinearAlgebra
@@ -8,24 +8,18 @@ using SpecialFunctions
 using DataFrames
 using Unitful
 using PhysicalConstants.CODATA2018
-
-include("medium.jl")
-include("spectrum.jl")
-include("emission.jl")
-include("lightyield.jl")
-include("detection.jl")
+using StatsBase
 
 
 export cuda_propagate_photons!, initialize_photon_arrays, process_output
 export cherenkov_ang_dist, cherenkov_ang_dist_int
 export propagate_distance
+export fit_photon_dist, make_photon_fits
 
-export Medium, Spectral, Emission, Detection, LightYield
-
-using .Medium
-using .Spectral
-using .Emission
-using .Detection
+using ..Medium
+using ..Spectral
+using ..Emission
+using ..Detection
 
 
 @inline function uniform(minval::T, maxval::T) where {T}
@@ -329,6 +323,7 @@ function cuda_propagate_photons!(
         end
 
         dir::SVector{3,T} = initialize_direction(source.emission_profile)
+        initial_dir = copy(dir)
         wavelength::T = initialize_wavelength(source.spectrum)
         pos::SVector{3,T} = source.position
 
@@ -389,7 +384,7 @@ function cuda_propagate_photons!(
                 CUDA.@cuassert stack_idx <= ix_offset + stack_len "Stack overflow"
 
                 out_positions[stack_idx] = pos
-                out_directions[stack_idx] = dir
+                out_directions[stack_idx] = initial_dir
                 out_dist_travelled[stack_idx] = dist_travelled
                 out_wavelengths[stack_idx] = wavelength
                 CUDA.atomic_xchg!(pointer(out_stack_pointers, block), stack_idx)
@@ -415,10 +410,14 @@ function process_output(output::AbstractVector{T}, stack_pointers::AbstractVecto
 
     stack_starts = collect(1:stack_len:out_size)
     out_sum = sum(stack_pointers .% stack_len)
+
     coalesced = Vector{T}(undef, out_sum)
     ix = 1
     for i in 1:size(stack_pointers, 1)
         sp = stack_pointers[i]
+        if sp == 0
+            continue
+        end
         this_len = (sp - stack_starts[i]) + 1
         coalesced[ix:ix+this_len-1, :] = output[stack_starts[i]:sp]
         #println("$(stack_starts[i]:sp) to $(ix:ix+this_len-1)")
@@ -626,11 +625,28 @@ function propagate_distance(distance::Float32, medium::MediumProperties, n_ph_ge
         positions, directions, wavelengths, dist_travelled, stack_idx, n_ph_sim, stack_len, Int64(0),
         Val(source), target.position, target.radius, Val(medium))
 
+    if all(stack_idx .== 0)
+        println("No photons survived (distance=$distance)")
+        return DataFrame()
+    end
+
+    n_ph_sim = Vector(n_ph_sim)[1]
+
     distt = process_output(Vector(dist_travelled), Vector(stack_idx))
     wls = process_output(Vector(wavelengths), Vector(stack_idx))
     directions = process_output(Vector(directions), Vector(stack_idx))
 
     abs_weight = convert(Vector{Float64}, exp.(-distt ./ get_absorption_length.(wls, Ref(medium))))
+
+    if n_ph_sim > n_ph_gen
+        n_ph_det = size(abs_weight, 1)
+        n_downsample = Int64(ceil(n_ph_det * n_ph_gen / n_ph_sim))
+        distt = distt[1:n_downsample]
+        wls = wls[1:n_downsample]
+        directions = directions[1:n_downsample]
+        abs_weight = abs_weight[1:n_downsample]
+    end
+
 
     ref_ix = get_refractive_index.(wls, Ref(medium))
     c_vac = ustrip(u"m/ns", SpeedOfLightInVacuum)
@@ -641,7 +657,7 @@ function propagate_distance(distance::Float32, medium::MediumProperties, n_ph_ge
     tres = (photon_times .- tgeo)
     thetas = map(dir -> acos(dir[3]), directions)
 
-    DataFrame(tres=tres, theta=thetas, ref_ix=ref_ix, abs_weight=abs_weight)
+    DataFrame(tres=tres, initial_theta=thetas, ref_ix=ref_ix, abs_weight=abs_weight, dist_travelled=distt)
 end
 
 function _init_workaround()

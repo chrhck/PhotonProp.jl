@@ -1,6 +1,9 @@
 module Emission
 
 using StaticArrays
+using SpecialFunctions
+using Interpolations
+
 using ..Spectral
 
 export AngularEmissionProfile
@@ -47,7 +50,7 @@ end
 Integral of the cherenkov angular distribution function.
 """
 
-function cherenkov_ang_dist_int(
+function _cherenkov_ang_dist_int(
     ref_index::Real,
     lower::Real=-1.0,
     upper::Real=1,
@@ -82,7 +85,18 @@ function cherenkov_ang_dist_int(
     return indef_int(upper) - indef_int(lower)
 end
 
+struct ChAngDistInt
+    interpolation
+end
 
+function interp_ch_ang_dist_int()
+    ref_ixs = 1.1:0.01:1.5
+    A = map(rfx -> _cherenkov_ang_dist_int(rfx, -1, 1), ref_ixs)
+    ChAngDistInt(LinearInterpolation(ref_ixs, A))
+end
+
+(f::ChAngDistInt)(ref_ix::Real) = f.interpolation(ref_ix)
+cherenkov_ang_dist_int = interp_ch_ang_dist_int()
 
 
 struct PhotonSource{T,U<:Spectrum,V<:AngularEmissionProfile}

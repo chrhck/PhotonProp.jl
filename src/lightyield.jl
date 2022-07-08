@@ -205,7 +205,7 @@ function particle_to_elongated_lightsource(
         cherenkov_track_length(particle.energy * 1u"GeV", particle.type)
     )
 
-    sources = Vector{PhotonSource}(undef, n_steps - 1)
+    sources = Vector{PhotonSource{T}}(undef, n_steps - 1)
     spectrum = CherenkovSpectrum(wl_range, 20, medium)
 
     pos_along = 0.5 .* (int_grid[1:end-1] .+ int_grid[2:end])
