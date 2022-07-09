@@ -12,9 +12,12 @@ using Flux: params as fparams
 using Flux.Data: DataLoader
 using Flux.Losses: mse
 using Flux: @epochs
-using Parameters: @with_kw
 using Random
 using LinearAlgebra
+using Base.Iterators
+
+using Logging: with_logger
+using TensorBoardLogger: TBLogger, tb_overwrite, set_step!, set_step_increment!
 
 using ..Emission
 using ..Detection
@@ -104,12 +107,15 @@ function make_photon_fits(n_photons_per_dist::Int64, n_distances::Integer, n_ang
 
 end
 
-@with_kw mutable struct Hyperparams
+Base.@kwdef mutable struct Hyperparams
     data_file::String
     batch_size::Int64
     learning_rate::Float64
     epochs::Int64
     width::Int64
+    dropout_rate::Float64
+    tblogger = true
+    savepath = "runs/"
 end
 
 function splitdf(df, pct)
@@ -172,18 +178,54 @@ function train_mlp(; kws...)
     model = Chain(
         Dense(2, args.width, relu),
         Dense(args.width, args.width, relu),
+        Dropout(args.dropout_rate),
+        Dense(args.width, args.width, relu),
+        Dropout(args.dropout_rate),
         Dense(args.width, 3))
 
 
     model = gpu(model)
     loss(x, y) = mse(model(x), y)
-
     optimiser = ADAM(args.learning_rate)
-    evalcb = () -> nothing # @show(loss_all(train_data, model))
 
-    println("Starting training.")
-    @epochs args.epochs Flux.train!(loss, fparams(model), train_data, optimiser, cb=evalcb)
+    if args.tblogger
+        tblogger = TBLogger(args.savepath, tb_overwrite)
+        set_step_increment!(tblogger, 0) ## 0 auto increment since we manually set_step!
+        @info "TensorBoard logging at \"$(args.savepath)\""
+    end
 
+    function report(epoch)
+        train_loss = loss_all(train_data, model)
+        test_loss = loss_all(test_data, model)
+        #println("Epoch: $epoch   Train: $(train)   Test: $(test)")
+        if args.tblogger
+            set_step!(tblogger, epoch)
+            with_logger(tblogger) do
+                @info "train" loss = train_loss
+                @info "test" loss = test_loss
+            end
+        end
+    end
+
+    ps = Flux.params(model)
+
+    @info "Starting training."
+    Flux.trainmode!(model)
+
+    for epoch in 1:args.epochs
+        for (x, y) in train_data
+
+            gs = Flux.gradient(ps) do
+                loss(x, y)
+            end
+
+            Flux.Optimise.update!(optimiser, ps, gs)
+        end
+        report(epoch)
+    end
+
+    #@epochs args.epochs Flux.train!(loss, fparams(model), train_data, optimiser, cb=evalcb)
+    Flux.testmode!(model)
     return model, test_data
 end
 

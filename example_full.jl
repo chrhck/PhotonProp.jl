@@ -27,6 +27,7 @@ begin
 	using Unitful
 	using LinearAlgebra
 	using Distributions
+	using Base.Iterators
 	
 	#ingredients (generic function with 1 method)
 	function ingredients(path::String)
@@ -124,8 +125,8 @@ Runs the photon propagation for multiple distances and reweights those simulatio
 
 # ╔═╡ 74b11928-fe9c-11ec-1d37-01f9b1e48fbe
 begin	
-	results_df = Modelling.make_photon_fits(Int64(1E8), 150, 150, 300f0)
-	write_parquet("photon_fits.parquet", results_df)
+	#results_df = Modelling.make_photon_fits(Int64(1E8), 150, 150, 300f0)
+	#write_parquet("photon_fits.parquet", results_df)
 	results_df = read_parquet("photon_fits.parquet")
 end
 
@@ -141,7 +142,8 @@ Here we fit a simple MLP to predict the distribution parameters (and the photon 
 
 # ╔═╡ cb97110d-97b2-410d-8ce4-bef9accfcef2
 begin
-	model, test_data = Modelling.train_mlp(epochs=100, width=700, learning_rate=0.001, batch_size=100, data_file="photon_fits.parquet")
+	model, test_data = Modelling.train_mlp(epochs=400, width=600, learning_rate=0.001, batch_size=300, data_file="photon_fits.parquet",
+	dropout_rate=0.5)
 	@show Modelling.loss_all(test_data, model)
 end
 
@@ -213,22 +215,74 @@ begin
 	gamma_pdf = Gamma(model_pred[1], model_pred[2])
 	
 	plot!(xs_plot, n_photons_pred .* pdf.(gamma_pdf, xs_plot))
+	n_photons_pred, sum(this_total_weight)
 end
 
 
 
 
+
+# ╔═╡ 31ab7848-b1d8-4380-872e-8a12c3331051
+md"""
+## Use model to simulate an event for a detector
+"""
 
 # ╔═╡ 4f7a9060-33dc-4bb8-9e41-eae5b9a30aa6
-n_photons_pred
+begin
+	function make_detector_cube(nx, ny, nz, spacing_vert, spacing_hor)
+	
+		positions = Vector{SVector{3, Float64}}(undef, nx*ny*nz)
+	
+		lin_ix = LinearIndices((1:nx, 1:ny, 1:nz))
+		for (i, j, k) in product(1:nx, 1:ny, 1:nz)
+			ix = lin_ix[i, j, k]
+			positions[ix] = @SVector [-0.5*spacing_hor*nx + (i-1)*spacing_hor, -0.5*spacing_hor*ny + (j-1)*spacing_hor, -0.5*spacing_vert*nz + (k-1)*spacing_vert]
+		end
+	
+		positions
+	
+	end
+	
+	
+	function make_targets(positions)
+		targets = map(pos -> Detection.DetectionSphere(pos, 0.21), positions)
+	end
+		
+end
 
 # ╔═╡ 40940de0-c45b-4236-82f0-54a77d5fbb9a
-sum(this_total_weight)
+begin
+	positions = make_detector_cube(5, 5, 10, 50., 100.)
+	
+	xs = [p[1] for p in positions]
+	ys = [p[2] for p in positions]
+	
+	scatter(xs, ys)
+end
 
-# ╔═╡ 3bee5efb-bcbb-4751-85f0-dd578d55e4e8
-    ptype = LightYield.EMinus
-    p = Particle(position, direction, time, energy, ptype)
-    sources = particle_to_elongated_lightsource(p, (0.0u"cm", 30.0u"m"), 0.5u"m", medium, (250.0u"nm", 800.0u"nm"))
+# ╔═╡ 910f5ee0-9859-4861-abc7-787648ae4c97
+
+
+# ╔═╡ 0dde21b1-6f84-4b1e-a8fa-82741ff90e13
+begin
+	targets = make_targets(positions)
+	particle = LightYield.Particle(
+		@SVector[0., 0., 0.],
+	    @SVector[0., 0., 1.],
+	    0.,
+	    1E5,
+	    LightYield.EMinus
+	)
+	
+	sources = LightYield.particle_to_elongated_lightsource(
+		particle,
+		(0.0u"m", 30.0u"m"),
+		0.1u"m",
+		medium64,
+		(250.0u"nm", 800.0u"nm"))
+	inputs = Modelling.source_to_input(sources, targets)
+	predictions = cpu(model(gpu(inputs)))
+
 end
 
 
@@ -236,8 +290,12 @@ end
 
 
 
-
-model_pred = cpu(model)(model_input)
+# ╔═╡ 0c0f4d2f-188f-433b-84aa-8258d44e3bdf
+begin
+	distances = norm.([src.position .- tgt.position for (src, tgt) in product(sources, targets)])[:]
+	
+	scatter(distances, 10 .^(-predictions[3, :]), xscale=:log10, yscale=:log10)
+end
 
 # ╔═╡ Cell order:
 # ╠═3e649cbf-1546-4204-82de-f6db5be401c7
@@ -255,6 +313,9 @@ model_pred = cpu(model)(model_input)
 # ╠═8638dde4-9f02-4dbf-9afb-32982390a0b6
 # ╠═0a37ce94-a949-4c3d-9cd7-1a64b1a3ce47
 # ╠═be1a6f87-65e3-4741-8b98-bb4d305bd8c3
+# ╠═31ab7848-b1d8-4380-872e-8a12c3331051
 # ╠═4f7a9060-33dc-4bb8-9e41-eae5b9a30aa6
 # ╠═40940de0-c45b-4236-82f0-54a77d5fbb9a
-# ╠═3bee5efb-bcbb-4751-85f0-dd578d55e4e8
+# ╠═910f5ee0-9859-4861-abc7-787648ae4c97
+# ╠═0dde21b1-6f84-4b1e-a8fa-82741ff90e13
+# ╠═0c0f4d2f-188f-433b-84aa-8258d44e3bdf
