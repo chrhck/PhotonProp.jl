@@ -28,6 +28,7 @@ begin
 	using LinearAlgebra
 	using Distributions
 	using Base.Iterators
+	using Hyperopt
 	
 	#ingredients (generic function with 1 method)
 	function ingredients(path::String)
@@ -97,7 +98,7 @@ t_{geo}(\lambda) = \frac{\mathrm{distance}}{\frac{c_{vac}}{n(\lambda)}}
 \end{align}
 ```
 
-Note: The detector is assumed to be 100% efficient. Lower detection efficiences can be trivialled added by aan additional (wl-dependent) weight.
+Note: The detector is assumed to be 100% efficient. Lower detection efficiences can be trivialled added by an additional (wl-dependent) weight.
 
 Photons can be reweighted to a Cherenkov angular emission spectrum:
 
@@ -142,9 +143,11 @@ Here we fit a simple MLP to predict the distribution parameters (and the photon 
 
 # ╔═╡ cb97110d-97b2-410d-8ce4-bef9accfcef2
 begin
-	model, test_data = Modelling.train_mlp(epochs=400, width=600, learning_rate=0.001, batch_size=300, data_file="photon_fits.parquet",
-	dropout_rate=0.5)
+	# Parameters from hyperparam optimization
+	model, test_data = Modelling.train_mlp(epochs=800, width=700, learning_rate=0.0001, batch_size=300, data_file="photon_fits.parquet",
+	dropout_rate=0.11)
 	@show Modelling.loss_all(test_data, model)
+
 end
 
 # ╔═╡ 8638dde4-9f02-4dbf-9afb-32982390a0b6
@@ -190,7 +193,7 @@ begin
 	
 	source = Emission.PhotonSource(position, direction, time, photons, spectrum, em_profile)
 
-	target_pos = @SVector[0.00, 80.0, 10.0]
+	target_pos = @SVector[20.00, 80.0, 10.0]
 	target = Detection.DetectionSphere(target_pos, 0.21)
 	
 	model_input = Matrix{Float32}(undef, (2, 1))
@@ -208,14 +211,15 @@ begin
 		obs_angle,
 		this_prop_result[:, :ref_ix]) .* this_prop_result[:, :abs_weight]
 	
-	histogram(this_prop_result[:, :tres], weights=this_total_weight, normalize=false)
+	histogram(this_prop_result[:, :tres], weights=this_total_weight, normalize=false,
+	xlabel="Time (ns)", ylabel="# Photons", label="MC")
 
 	xs_plot = 0:0.1:15
 	
 	gamma_pdf = Gamma(model_pred[1], model_pred[2])
 	
-	plot!(xs_plot, n_photons_pred .* pdf.(gamma_pdf, xs_plot))
-	n_photons_pred, sum(this_total_weight)
+	plot!(xs_plot, n_photons_pred .* pdf.(gamma_pdf, xs_plot), label="Model")
+	#n_photons_pred, sum(this_total_weight)
 end
 
 
@@ -224,7 +228,9 @@ end
 
 # ╔═╡ 31ab7848-b1d8-4380-872e-8a12c3331051
 md"""
-## Use model to simulate an event for a detector
+## Use model to simulate an event for a detector.
+
+The "particle" (EM-cascade) is split into a series of point-like Cherenov emitters, aligned along the cascade axis. Their respective lightyield is calculated from the longitudinal profile of EM cascades.
 """
 
 # ╔═╡ 4f7a9060-33dc-4bb8-9e41-eae5b9a30aa6
@@ -242,7 +248,6 @@ begin
 		positions
 	
 	end
-	
 	
 	function make_targets(positions)
 		targets = map(pos -> Detection.DetectionSphere(pos, 0.21), positions)
@@ -303,7 +308,7 @@ end
 # ╠═a615b299-3868-4083-9db3-806d7390eca1
 # ╠═4db5a2bd-97bc-412c-a1d3-cb8391425e20
 # ╠═b37de33c-af67-4983-9932-2c32e8db399f
-# ╟─911c5c61-bcaa-4ba4-b5c0-09a112b6e877
+# ╠═911c5c61-bcaa-4ba4-b5c0-09a112b6e877
 # ╠═30c4a297-715d-4268-b91f-22d0cac66511
 # ╟─26469e97-51a8-4c00-a69e-fe50ad3a625a
 # ╠═74b11928-fe9c-11ec-1d37-01f9b1e48fbe

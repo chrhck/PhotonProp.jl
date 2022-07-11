@@ -17,7 +17,7 @@ using LinearAlgebra
 using Base.Iterators
 
 using Logging: with_logger
-using TensorBoardLogger: TBLogger, tb_overwrite, set_step!, set_step_increment!
+using TensorBoardLogger: TBLogger, tb_increment, set_step!, set_step_increment!
 
 using ..Emission
 using ..Detection
@@ -189,7 +189,7 @@ function train_mlp(; kws...)
     optimiser = ADAM(args.learning_rate)
 
     if args.tblogger
-        tblogger = TBLogger(args.savepath, tb_overwrite)
+        tblogger = TBLogger(args.savepath, tb_increment)
         set_step_increment!(tblogger, 0) ## 0 auto increment since we manually set_step!
         @info "TensorBoard logging at \"$(args.savepath)\""
     end
@@ -203,6 +203,7 @@ function train_mlp(; kws...)
             with_logger(tblogger) do
                 @info "train" loss = train_loss
                 @info "test" loss = test_loss
+
             end
         end
     end
