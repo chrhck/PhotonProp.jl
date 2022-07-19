@@ -15,6 +15,7 @@ using Flux: @epochs
 using Random
 using LinearAlgebra
 using Base.Iterators
+using Zygote
 
 using Logging: with_logger
 using TensorBoardLogger: TBLogger, tb_increment, set_step!, set_step_increment!
@@ -62,9 +63,11 @@ function fit_photon_dist(obs_angles, obs_photon_df, n_ph_gen)
     ph_abs_weight = obs_photon_df[:, :abs_weight]
     ph_tres = obs_photon_df[:, :tres]
 
+    pmt_acc_weight = p_one_pmt_acc.(obs_photon_df[:, :wavelength])
+
     for obs_angle in obs_angles
         dir_weight = get_dir_reweight(ph_thetas, obs_angle, ph_ref_ix)
-        total_weight = dir_weight .* ph_abs_weight
+        total_weight = dir_weight .* ph_abs_weight .* pmt_acc_weight
 
         mask = ph_tres .>= 0
 
@@ -107,13 +110,14 @@ function make_photon_fits(n_photons_per_dist::Int64, n_distances::Integer, n_ang
 
 end
 
-Base.@kwdef mutable struct Hyperparams
+Base.@kwdef mutable struct Hyperparams{U<:AbstractRNG}
     data_file::String
     batch_size::Int64
     learning_rate::Float64
     epochs::Int64
     width::Int64
     dropout_rate::Float64
+    rng::U
     tblogger = true
     savepath = "runs/"
 end
@@ -126,16 +130,36 @@ function splitdf(df, pct)
     return view(df, sel, :), view(df, .!sel, :)
 end
 
-function read_from_parquet(filename)
+struct FeatureTransformation
+    forward::Function
+    backward::Function
+end
+
+
+apply_transformation(x::T, t::FeatureTransformation) where {T<:Real} = convert(T, t.forward(x))
+apply_transformation(x::U, t::FeatureTransformation) where {T<:Real,U<:AbstractVector{T}} = convert(U, t.forward.(x))
+reverse_transformation(x::T, t::FeatureTransformation) where {T<:Real} = convert(T, t.backward(x))
+reverse_transformation(x::U, t::FeatureTransformation) where {T<:Real,U<:AbstractVector{T}} = convert(U, t.backward.(x))
+
+
+function read_from_parquet(filename, trafos)
     results_df = DataFrame(read_parquet(filename))
 
     results_df[!, :] = convert.(Float32, results_df[!, :])
+
+    transform!(results_df, [in => (x -> apply_transformation(x, value)) => out for ((in, out), value) in trafos]...)
+
+    #=
     results_df[!, :log_det_fraction] = -log10.(results_df[!, :det_fraction])
+    results_df[!, :log_det_fraction_scaled] = ((-log10.(results_df[!, :det_fraction])) .- 3) ./ 10
+
     results_df[!, :log_distance] = log10.(results_df[!, :distance])
     results_df[!, :cos_obs_angle] = cos.(results_df[!, :obs_angle])
+    results_df[!, :fit_alpha_scaled] = results_df[!, :fit_alpha] ./ 100
 
+    =#
     feature_names = [:log_distance, :cos_obs_angle]
-    target_names = [:fit_alpha, :fit_theta, :log_det_fraction]
+    target_names = [:log_fit_alpha, :log_fit_theta, :log_det_fraction_scaled]
 
     df_train, df_test = splitdf(results_df, 0.8)
 
@@ -149,12 +173,21 @@ end
 
 function get_data(args::Hyperparams)
 
-    features_train, targets_train, features_test, targets_test = read_from_parquet(args.data_file)
+    trafos = Dict(
+        (:det_fraction, :log_det_fraction) => FeatureTransformation(x -> -log10(x), x -> exp10(-x)),
+        (:det_fraction, :log_det_fraction_scaled) => FeatureTransformation(x -> (-log10(x) - 3) / 10, x -> exp10(-(x * 10 + 3))),
+        (:obs_angle, :cos_obs_angle) => FeatureTransformation(x -> cos(x), x -> acos(x)),
+        (:fit_alpha, :log_fit_alpha) => FeatureTransformation(x -> log10(x), x -> exp10(x)),
+        (:fit_theta, :log_fit_theta) => FeatureTransformation(x -> log10(x), x -> exp10(x)),
+        (:distance, :log_distance) => FeatureTransformation(x -> log10(x), x -> exp10(x))
+    )
 
-    loader_train = DataLoader((features_train, targets_train), batchsize=args.batch_size, shuffle=true)
+    features_train, targets_train, features_test, targets_test = read_from_parquet(args.data_file, trafos)
+
+    loader_train = DataLoader((features_train, targets_train), batchsize=args.batch_size, shuffle=true, rng=args.rng)
     loader_test = DataLoader((features_test, targets_test), batchsize=args.batch_size)
 
-    loader_train, loader_test
+    loader_train, loader_test, trafos
 end
 
 function loss_all(dataloader, model)
@@ -171,15 +204,18 @@ function train_mlp(; kws...)
     args = Hyperparams(; kws...)
 
     ## Load processed data
-    train_data, test_data = get_data(args)
+    train_data, test_data, trafos = get_data(args)
     train_data = gpu.(train_data)
     test_data = gpu.(test_data)
 
+
     model = Chain(
-        Dense(2, args.width, relu),
-        Dense(args.width, args.width, relu),
+        Dense(2, args.width, relu, init=Flux.glorot_uniform),
+        Dense(args.width, args.width, relu, init=Flux.glorot_uniform),
         Dropout(args.dropout_rate),
-        Dense(args.width, args.width, relu),
+        Dense(args.width, args.width, relu, init=Flux.glorot_uniform),
+        Dropout(args.dropout_rate),
+        Dense(args.width, args.width, relu, init=Flux.glorot_uniform),
         Dropout(args.dropout_rate),
         Dense(args.width, 3))
 
@@ -227,7 +263,7 @@ function train_mlp(; kws...)
 
     #@epochs args.epochs Flux.train!(loss, fparams(model), train_data, optimiser, cb=evalcb)
     Flux.testmode!(model)
-    return model, test_data
+    return model, train_data, test_data, trafos
 end
 
 function source_to_input(source::PhotonSource, target::PhotonTarget)
@@ -236,15 +272,15 @@ function source_to_input(source::PhotonSource, target::PhotonTarget)
     em_rec_vec = em_rec_vec ./ distance
     cos_obs_angle = dot(em_rec_vec, source.direction)
 
-    return log10(distance), cos_obs_angle
+    return Float32(log10(distance)), Float32(cos_obs_angle)
 
 end
 
-function source_to_input(sources::AbstractVector{PhotonSource{T}}, targets::AbstractVector{U}) where {T<:Real,U<:PhotonTarget{T}}
+function source_to_input(sources::AbstractVector{PhotonSource}, targets::AbstractVector{T}) where {T<:PhotonTarget}
 
     total_size = size(sources, 1) * size(targets, 1)
 
-    inputs = Matrix{T}(undef, (2, total_size))
+    inputs = Matrix{Float32}(undef, (2, total_size))
 
     for (i, (src, tgt)) in enumerate(product(sources, targets))
         inputs[:, i] .= source_to_input(src, tgt)
@@ -252,6 +288,15 @@ function source_to_input(sources::AbstractVector{PhotonSource{T}}, targets::Abst
     inputs
 end
 
+function transform_model_output!(output::Union{Zygote.Buffer,AbstractMatrix{T}}, trafos::AbstractVector{FeatureTransformation}) where {T<:Real}
+
+    if size(output, 1) != size(trafos, 1)
+        error("Feature dimension size must equal number of transformations")
+    end
+
+    output .= reverse_transformation.(output, trafos)
+
+end
 
 
 end

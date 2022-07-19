@@ -5,14 +5,16 @@ export Spectrum, Monochromatic, CherenkovSpectralDist, CherenkovSpectrum
 export frank_tamm, frank_tamm_norm, frank_tamm_inverted_cdf
 
 using Distributions
-using QuadGK
+
 using Interpolations
 using PhysicalConstants.CODATA2018
 using Unitful
 using Random
 using StaticArrays
+using LinearAlgebra
 
 using ..Medium
+using ..Utils
 
 abstract type Spectrum end
 
@@ -21,26 +23,27 @@ struct Monochromatic{T} <: Spectrum
 end
 
 
+
 """
-    frank_tamm(Length, RefIndex, [Permeability])
+    frank_tamm(wavelength::Real, ref_index::T) where {T<:Real}
 
 Evaluate Frank-Tamm formula
 """
-function frank_tamm(wavelength::Unitful.Length{T}, ref_index::T) where {T<:Real}
+function frank_tamm(wavelength::Real, ref_index::T) where {T<:Real}
     return T(2 * pi * FineStructureConstant / wavelength^2 * (1 - 1 / ref_index^2))
 end
 
 """
-    frank_tamm_norm(wl_range, ref_index_func)
+    frank_tamm_norm(wl_range::Tuple{T, T}, ref_index_func::Function) where {T<:Real}
 
-Calculate number of Cherenkov photons in interval `wl_range`.
-If `wl_range` is unitles, assumes it's given in nm
+Calculate number of Cherenkov photons per length in interval `wl_range`.
+Returned number is in units cm^-1.
 """
-function frank_tamm_norm(wl_range::Tuple{Unitful.Length{T},Unitful.Length{T}}, ref_index_func::Function) where {T<:Real}
-    quadgk(x -> frank_tamm(x, ref_index_func(x)), wl_range[1], wl_range[2])[1]
+function frank_tamm_norm(wl_range::Tuple{T,T}, ref_index_func::Function) where {T<:Real}
+    f(x) = frank_tamm(x, ref_index_func(x))
+    integrate_gauss_quad(f, wl_range[1], wl_range[2]) * 1E7
 end
 
-frank_tamm_norm(wl_range::Tuple{Real,Real}, ref_index_func::Function) = frank_tamm_norm(wl_range .* 1u"nm", ref_index_func)
 
 """
     frank_tamm_inverted_cdf(wl_range, step_size)
@@ -95,13 +98,6 @@ struct CherenkovSpectrum{T<:Real,N} <: Spectrum
         eval_knots = range(T(0), T(1), interp_steps)
         knots = SVector{interp_steps,T}(spec.interpolation(eval_knots))
         return new{T,interp_steps}(wl_range, knots)
-    end
-
-    function CherenkovSpectrum(
-        wl_range::Tuple{Unitful.Length{T},Unitful.Length{T}},
-        interp_steps::U,
-        medium::V) where {T<:Real,U<:Integer,V<:MediumProperties}
-        CherenkovSpectrum((ustrip(u"nm", wl_range[1]), ustrip(u"nm", wl_range[2])), interp_steps, medium)
     end
 
 end

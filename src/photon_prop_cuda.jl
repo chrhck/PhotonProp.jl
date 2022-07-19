@@ -16,6 +16,7 @@ export cherenkov_ang_dist, cherenkov_ang_dist_int
 export propagate_distance
 export fit_photon_dist, make_photon_fits
 
+using ..Utils
 using ..Medium
 using ..Spectral
 using ..Emission
@@ -54,30 +55,12 @@ end
     sph_to_cart(theta, phi)
 end
 
-function cuda_fast_linear_interp(x::T, knots::AbstractVector{T}, lower::T, upper::T) where {T}
-    # assume equidistant
+"""
+    fast_linear_interp(x_eval::T, xs::AbstractVector{T}, ys::AbstractVector{T})
 
-    x = CUDA.clamp(x, lower, upper)
-    range = upper - lower
-    n_knots = size(knots, 1)
-    step_size = range / (n_knots - 1)
+Linearly interpolate xs -> ys and evaluate x_eval on interpolation. Assume xs are sorted in ascending order.
+"""
 
-    along_range = (x - lower) / step_size
-    along_range_floor = CUDA.floor(along_range)
-    lower_knot = Int64(along_range_floor) + 1
-
-    if lower_knot == n_knots
-        return @inbounds knots[end]
-    end
-
-    along_step = along_range - along_range_floor
-    @inbounds y_low = knots[lower_knot]
-    @inbounds slope = (knots[lower_knot+1] - y_low)
-
-    interpolated = y_low + slope * along_step
-
-    return interpolated
-end
 
 
 
@@ -88,7 +71,7 @@ end
 @inline initialize_wavelength(spectrum::Monochromatic{T}) where {T} = spectrum.wavelength
 
 @inline function initialize_wavelength(spectrum::CherenkovSpectrum{T}) where {T}
-    cuda_fast_linear_interp(rand(T), spectrum.knots, T(0), T(1))
+    fast_linear_interp(rand(T), spectrum.knots, T(0), T(1))
 end
 
 
@@ -657,7 +640,7 @@ function propagate_distance(distance::Float32, medium::MediumProperties, n_ph_ge
     tres = (photon_times .- tgeo)
     thetas = map(dir -> acos(dir[3]), directions)
 
-    DataFrame(tres=tres, initial_theta=thetas, ref_ix=ref_ix, abs_weight=abs_weight, dist_travelled=distt)
+    DataFrame(tres=tres, initial_theta=thetas, ref_ix=ref_ix, abs_weight=abs_weight, dist_travelled=distt, wavelength=wls)
 end
 
 function _init_workaround()

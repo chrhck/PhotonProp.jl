@@ -10,12 +10,16 @@ using Parameters: @with_kw
 using SpecialFunctions: gamma
 using StaticArrays
 using QuadGK
-using Unitful
 using Sobol
+using Zygote
 using PhysicalConstants.CODATA2018
+using Unitful
 using ..Emission
 using ..Spectral
 using ..Medium
+using ..Utils
+
+c_vac_m_p_ns = ustrip(u"m/ns", SpeedOfLightInVacuum)
 
 
 @enum ParticleType begin
@@ -35,30 +39,30 @@ LongitudinalParametersEPlus = LongitudinalParameters(alpha=2.00035, beta=1.45501
 LongitudinalParametersGamma = LongitudinalParameters(alpha=2.83923, beta=1.34031, b=0.64526)
 
 @with_kw struct CherenkovTrackLengthParameters
-    alpha::typeof(1.0u"cm")
+    alpha::Float64 # cm
     beta::Float64
-    alpha_dev::typeof(1.0u"cm")
+    alpha_dev::Float64 # cm
     beta_dev::Float64
 end
 
 CherenkovTrackLengthParametersEMinus = CherenkovTrackLengthParameters(
-    alpha=532.07078881u"cm",
+    alpha=532.07078881,
     beta=1.00000211,
-    alpha_dev=5.78170887u"cm",
+    alpha_dev=5.78170887,
     beta_dev=0.5
 )
 
 CherenkovTrackLengthParametersEPlus = CherenkovTrackLengthParameters(
-    alpha=532.11320598u"cm",
+    alpha=532.11320598,
     beta=0.99999254,
-    alpha_dev=5.73419669u"cm",
+    alpha_dev=5.73419669,
     beta_dev=0.5
 )
 
 CherenkovTrackLengthParametersGamma = CherenkovTrackLengthParameters(
-    alpha=532.08540905u"cm",
+    alpha=532.08540905,
     beta=0.99999877,
-    alpha_dev=5.78170887u"cm",
+    alpha_dev=5.78170887,
     beta_dev=5.66586567
 )
 
@@ -82,20 +86,28 @@ get_track_length_params(ptype::ParticleType) = get_params(ptype)[2]
 
 
 function long_parameter_a_edep(
-    energy::Unitful.Energy,
+    energy::Real,
     long_pars::LongitudinalParameters
 )
-    long_pars.alpha + long_pars.beta * log10(ustrip(u"GeV", energy))
+    long_pars.alpha + long_pars.beta * log10(energy)
 end
-long_parameter_a_edep(energy::Unitful.Energy, ptype::ParticleType) = long_parameter_a_edep(energy, get_longitudinal_params(ptype))
+long_parameter_a_edep(energy::Real, ptype::ParticleType) = long_parameter_a_edep(energy, get_longitudinal_params(ptype))
 
-long_parameter_b_edep(::Unitful.Energy, long_pars::LongitudinalParameters) = long_pars.b
-long_parameter_b_edep(energy::Unitful.Energy, ptype::ParticleType) = long_parameter_b_edep(energy, get_longitudinal_params(ptype))
+long_parameter_b_edep(::Real, long_pars::LongitudinalParameters) = long_pars.b
+long_parameter_b_edep(energy::Real, ptype::ParticleType) = long_parameter_b_edep(energy, get_longitudinal_params(ptype))
 
+"""
+    longitudinal_profile(energy::Real, z::Real, medium::MediumProperties, long_pars::LongitudinalParameters)
+    
+energy in GeV, z in cm,
+"""
 function longitudinal_profile(
-    energy::Unitful.Energy{T}, z::Unitful.Length{T}, medium::MediumProperties, long_pars::LongitudinalParameters) where {T<:Real}
-    lrad = radiation_length(medium)u"g/cm^2" / density(medium)u"kg/m^3"
-    t = uconvert(Unitful.NoUnits, z / lrad)
+    energy::Real, z::Real, medium::MediumProperties, long_pars::LongitudinalParameters)
+
+    unit_conv = 1000 # g/cm^2 / "kg/m^3" in cm    
+    lrad = radiation_length(medium) / density(medium) * unit_conv # cm
+
+    t = z / lrad
     b = long_parameter_b_edep(energy, long_pars)
     a = long_parameter_a_edep(energy, long_pars)
 
@@ -103,55 +115,72 @@ function longitudinal_profile(
 end
 
 function longitudinal_profile(
-    energy::Unitful.Energy{T}, z::Unitful.Length{T}, medium::MediumProperties, ptype::ParticleType) where {T<:Real}
+    energy, z, medium, ptype::ParticleType)
     longitudinal_profile(energy, z, medium, get_longitudinal_params(ptype))
 end
 
-function fractional_contrib_long(
-    energy::Unitful.Energy,
+
+function fractional_contrib_long!(
+    energy::Real,
     z_grid::AbstractVector{T},
     medium::MediumProperties,
     long_pars::LongitudinalParameters,
-) where {T<:Unitful.Length}
+    output::Union{Zygote.Buffer,AbstractVector{T}}
+) where {T<:Real}
+
+    if length(z_grid) != length(output)
+        error("Grid and output are not of the same length")
+    end
 
     int_range = extrema(z_grid)
-    norm = quadgk(
+    norm = integrate_gauss_quad(
         z -> longitudinal_profile(energy, z, medium, long_pars),
-        int_range[1], int_range[2])[1]
+        int_range[1], int_range[2])
 
-    part_contribs = Vector{Float64}(undef, size(z_grid, 1))
-    part_contribs[1] = 0
+    output[1] = 0
     @inbounds for i in 1:size(z_grid, 1)-1
-        part_contribs[i+1] = (
+        output[i+1] = (
             1 / norm *
-            quadgk(
+            integrate_gauss_quad(
                 z -> longitudinal_profile(energy, z, medium, long_pars),
                 z_grid[i], z_grid[i+1])[1]
         )
     end
-    part_contribs
+    output
+end
+
+function fractional_contrib_long!(
+    energy,
+    z_grid,
+    medium,
+    ptype::ParticleType,
+    output)
+    fractional_contrib_long!(energy, z_grid, medium, get_longitudinal_params(ptype), output)
 end
 
 function fractional_contrib_long(
-    energy::Unitful.Energy,
+    energy::Real,
     z_grid::AbstractVector{T},
     medium::MediumProperties,
-    ptype::ParticleType,
-) where {T<:Unitful.Length}
-    fractional_contrib_long(energy, z_grid, medium, get_longitudinal_params(ptype))
+    pars_or_ptype::Union{LongitudinalParameters,ParticleType}
+) where {T<:Real}
+    output = similar(z_grid)
+    fractional_contrib_long!(energy, z_grid, medium, pars_or_ptype, output)
 end
 
 
 
-function cherenkov_track_length_dev(energy::Unitful.Energy, track_len_params::CherenkovTrackLengthParameters)
-    track_len_params.alpha_dev * ustrip(u"GeV", energy)^track_len_params.beta_dev
-end
-cherenkov_track_length_dev(energy::Unitful.Energy, ptype::ParticleType) = cherenkov_track_length_dev(energy, get_track_length_params(ptype))
 
-function cherenkov_track_length(energy::Unitful.Energy, track_len_params::CherenkovTrackLengthParameters)
-    track_len_params.alpha * ustrip(u"GeV", energy)^track_len_params.beta
+
+function cherenkov_track_length_dev(energy::Real, track_len_params::CherenkovTrackLengthParameters)
+    track_len_params.alpha_dev * energy^track_len_params.beta_dev
 end
-cherenkov_track_length(energy::Unitful.Energy, ptype::ParticleType) = cherenkov_track_length(energy, get_track_length_params(ptype))
+cherenkov_track_length_dev(energy::Real, ptype::ParticleType) = cherenkov_track_length_dev(energy, get_track_length_params(ptype))
+
+function cherenkov_track_length(energy::Real, track_len_params::CherenkovTrackLengthParameters)
+    track_len_params.alpha * energy^track_len_params.beta
+end
+cherenkov_track_length(energy::Real, ptype::ParticleType) = cherenkov_track_length(energy, get_track_length_params(ptype))
 
 mutable struct Particle{T}
     position::SVector{3,T}
@@ -164,14 +193,13 @@ end
 function particle_to_lightsource(
     particle::Particle{T},
     medium::MediumProperties,
-    wl_range::Tuple{Unitful.Length{T},Unitful.Length{T}}
+    wl_range::Tuple{T,T}
 ) where {T<:Real}
 
     total_contrib = (
         frank_tamm_norm(wl_range, wl -> medium.ref_ix) *
-        cherenkov_track_length.(particle.energy * 1u"GeV", particle.type)
+        cherenkov_track_length.(particle.energy, particle.type)
     )
-
 
     PhotonSource(
         particle.position,
@@ -184,39 +212,48 @@ function particle_to_lightsource(
 
 end
 
-function particle_to_elongated_lightsource(
+function particle_to_elongated_lightsource!(
     particle::Particle{T},
-    range::Tuple{Unitful.Length{T},Unitful.Length{T}},
-    precision::Unitful.Length{T},
+    int_grid::AbstractArray{T},
     medium::MediumProperties,
-    wl_range::Tuple{Unitful.Length{T},Unitful.Length{T}}
+    spectrum::Spectrum,
+    wl_range::Tuple{T,T},
+    output::Union{Zygote.Buffer,AbstractVector{PhotonSource}},
 ) where {T<:Real}
 
 
-    range_cm = (ustrip(u"cm", range[1]), ustrip(u"cm", range[2]))
+    """
     s = SobolSeq([range_cm[1]], [range_cm[2]])
 
     n_steps = Int64(ceil(ustrip(Unitful.NoUnits, (range[2] - range[1]) / precision)))
     int_grid = sort!(vec(reduce(hcat, next!(s) for i in 1:n_steps)))u"cm"
+    """
 
-    fractional_contrib = fractional_contrib_long(particle.energy * 1u"GeV", int_grid, medium, particle.type)
+    n_steps = length(int_grid)
+
+    fractional_contrib_vec = Vector{T}(undef, n_steps)
+
+    if typeof(output) <: Zygote.Buffer
+        fractional_contrib = Zygote.Buffer(fractional_contrib_vec)
+    else
+        fractional_contrib = fractional_contrib_vec
+    end
+
+    fractional_contrib_long!(particle.energy, int_grid, medium, particle.type, fractional_contrib)
+
     total_contrib = (
         frank_tamm_norm(wl_range, wl -> get_refractive_index(wl, medium)) *
-        cherenkov_track_length(particle.energy * 1u"GeV", particle.type)
+        cherenkov_track_length(particle.energy, particle.type)
     )
 
-    sources = Vector{PhotonSource{T}}(undef, n_steps - 1)
-    spectrum = CherenkovSpectrum(wl_range, 20, medium)
 
-    pos_along = 0.5 .* (int_grid[1:end-1] .+ int_grid[2:end])
+    step_along = [0.5 * (int_grid[i] + int_grid[i+1]) for i in 1:(n_steps-1)]
 
     for i in 2:n_steps
-        step_along = ustrip(u"m", pos_along[i-1])
+        this_pos = particle.position .+ step_along[i-1] .* particle.direction
+        this_time = particle.time + step_along[i-1] / c_vac_m_p_ns
 
-        this_pos = particle.position .+ step_along .* particle.direction
-        this_time = particle.time + ustrip(u"ns", step_along * 1u"m" / SpeedOfLightInVacuum)
-
-        this_nph = Int64(round(ustrip(Unitful.NoUnits, total_contrib * fractional_contrib[i])))
+        this_nph = Int64(round(total_contrib * fractional_contrib[i]))
 
         this_src = PhotonSource(
             this_pos,
@@ -226,10 +263,25 @@ function particle_to_elongated_lightsource(
             spectrum,
             AngularEmissionProfile{:CherenkovAngularEmission,Float64}())
 
-        sources[i-1] = this_src
+        output[i-1] = this_src
     end
 
-    sources
+    output
+end
+
+function particle_to_elongated_lightsource(
+    particle::Particle{T},
+    len_range::Tuple{T,T},
+    precision::T,
+    medium::MediumProperties,
+    spectrum::Spectrum,
+    wl_range::Tuple{T,T}
+) where {T<:Real}
+
+    int_grid = range(len_range[1], len_range[2], step=precision)
+    n_steps = size(int_grid, 1)
+    output = Vector{PhotonSource}(undef, n_steps - 1)
+    particle_to_elongated_lightsource!(particle, int_grid, medium, spectrum, wl_range, output)
 end
 
 

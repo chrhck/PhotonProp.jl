@@ -1,6 +1,9 @@
 module Medium
 using Unitful
-using Parameters: @with_kw
+using Base: @kwdef
+
+using ..Utils
+
 export make_cascadia_medium_properties
 export salinity, pressure, temperature, vol_conc_small_part, vol_conc_large_part, radiation_length, density
 export get_refractive_index, get_scattering_length, get_absorption_length
@@ -15,7 +18,7 @@ abstract type MediumProperties{T} end
 """
     WaterProperties(salinity, presure, temperature, vol_conc_small_part, vol_conc_large_part)
 
-Properties for a water-like medium. Use unitful constructor to creat a value of this type.
+Properties for a water-like medium. Use unitful constructor to create a value of this type.
 """
 struct WaterProperties{T} <: MediumProperties{T}
     salinity::T # permille
@@ -56,7 +59,7 @@ make_cascadia_medium_properties(T::Type) = WaterProperties(
 
 
 
-@with_kw struct DIPPR105Params
+@kwdef struct DIPPR105Params
     A::Float64
     B::Float64
     C::Float64
@@ -66,7 +69,15 @@ end
 # http://ddbonline.ddbst.de/DIPPR105DensityCalculation/DIPPR105CalculationCGI.exe?component=Water
 DDBDIPR105Params = DIPPR105Params(A=0.14395, B=0.0112, C=649.727, D=0.05107)
 
-DIPPR105(temperature::Unitful.Temperature, params::DIPPR105Params=DDBDIPR105Params) = 1u"kg/m^3" * params.A / params.B^(1 + (1 - ustrip(u"K", temperature) / params.C)^params.D)
+"""
+    DIPPR105(temperature::Real, params::DIPPR105Params=DDBDIPR105Params)
+
+Use DPPIR105 formula to calculate water density as function of temperature.
+temperature in K
+
+Returns pressure in kg/m^3
+"""
+DIPPR105(temperature::Real, params::DIPPR105Params=DDBDIPR105Params) = params.A / params.B^(1 + (1 - temperature) / params.C)^params.D
 
 salinity(::T) where {T<:MediumProperties} = error("Not implemented for $T")
 salinity(x::WaterProperties) = x.salinity
@@ -78,7 +89,7 @@ temperature(::T) where {T<:MediumProperties} = error("Not implemented for $T")
 temperature(x::WaterProperties) = x.temperature
 
 density(::T) where {T<:MediumProperties} = error("Not implemented for $T")
-density(x::WaterProperties) = ustrip(u"kg/m^3", DIPPR105(temperature(x)u"K"))
+density(x::WaterProperties) = DIPPR105(temperature(x))
 
 vol_conc_small_part(::T) where {T<:MediumProperties} = error("Not implemented for $T")
 vol_conc_small_part(x::WaterProperties) = x.vol_conc_small_part
@@ -229,8 +240,14 @@ function get_scattering_length(wavelength::Unitful.Length, medium::MediumPropert
 end
 
 
-function get_absorption_length(wavelength::Real, medium::WaterProperties)
-    return typeof(wavelength)(25)
+function get_absorption_length(wavelength::T, ::WaterProperties) where {T<:Real}
+
+    x = [T(300.0), T(365.0), T(400.0), T(450.0), T(585.0), T(800.0)]
+    y = [T(10.4), T(10.4), T(14.5), T(27.7), T(7.1), T(7.1)]
+
+    fast_linear_interp(wavelength, x, y)
+
+
 end
 
 

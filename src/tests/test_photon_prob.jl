@@ -3,9 +3,11 @@ using Statistics
 using StaticArrays
 using CUDA
 using Random
-include("photon_prob_cuda.jl")
+include("../photon_prop.jl")
 
 using .PhotonPropagation
+using .PhotonPropagationCuda
+using .Utils
 
 Random.seed!(0)
 @testset "random numbers" begin
@@ -68,4 +70,21 @@ end
 
     @test update_position(p, a, 10.0) ≈ @SVector[0, 10.0, 0]
 
+end
+
+@testset "interpolation" begin
+    f(x) = x^2
+
+    xs = 0.0:1.0:4.0
+    ys = f.(xs)
+
+    @test fast_linear_interp(0.5, xs, ys) ≈ 0.5
+    @test fast_linear_interp(1.5, xs, ys) ≈ 2.5
+    @test fast_linear_interp(4.5, xs, ys) ≈ 16
+    @test fast_linear_interp(-1., xs, ys) ≈ 0
+
+    @test fast_linear_interp(0.5, ys, 0.0, 4.0) ≈ 0.5
+    @test fast_linear_interp(1.5, ys, 0.0, 4.0) ≈ 2.5
+    @test fast_linear_interp(4.5, ys, 0.0, 4.0) ≈ 16
+    @test fast_linear_interp(-1., ys, 0.0, 4.0) ≈ 0
 end
